@@ -290,7 +290,7 @@ function _M.init_worker()
             timer_working_pool_check_running = true
             local ok, err = pcall(timer_working_pool_check)
             if not ok then
-                core.log.error("failed to run timer_working_pool_check: ", err)
+                -- core.log.error("failed to run timer_working_pool_check: ", err)
             end
             timer_working_pool_check_running = false
         end

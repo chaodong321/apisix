@@ -218,11 +218,11 @@ end
 
 
 
-local function fetch_health_instances(conf, checkers)
-    local instances = conf.instances
+local function fetch_health_instances(allow_instances, checkers)
+    local instances = allow_instances
     local new_instances = core.table.new(0, #instances)
     if not checkers then
-        for _, ins in ipairs(conf.instances) do
+        for _, ins in ipairs(instances) do
             transform_instances(new_instances, ins)
         end
         return new_instances
@@ -258,14 +258,14 @@ local function fetch_health_instances(conf, checkers)
 end
 
 
-local function create_server_picker(conf, ups_tab, checkers)
+local function create_server_picker(conf, allow_instances, ups_tab, checkers)
     local picker = pickers[conf.balancer.algorithm] -- nil check
     if not picker then
         pickers[conf.balancer.algorithm] = require("apisix.balancer." .. conf.balancer.algorithm)
         picker = pickers[conf.balancer.algorithm]
     end
 
-    local new_instances = fetch_health_instances(conf, checkers)
+    local new_instances = fetch_health_instances(allow_instances, checkers)
     core.log.info("fetch health instances: ", core.json.delay_encode(new_instances))
 
     if #new_instances._priority_index > 1 then
@@ -314,11 +314,30 @@ end
 
 
 local function pick_target(ctx, conf, ups_tab)
+    core.log.warn("pick_target...")
     local checkers
     local res_conf = resource.fetch_latest_conf(conf._meta.parent.resource_key)
     if not res_conf then
         return nil, nil, "failed to fetch the parent config"
     end
+    local request_table, _ = core.request.get_json_request_body_table()
+    local request_model = request_table and request_table.model
+    local allow_instances = {}
+    if not request_model then
+        core.log.warn("request llm model is empty, allow all instance to pick")
+        allow_instances = conf.instances
+    else
+        core.log.warn("request llm model: ", request_model)
+        local i = 1
+        for _, ins in ipairs(conf.instances) do
+            local model = ins.options and ins.options.model or ins.model
+            if model and model == request_model then
+                core.log.warn("allow llm instance: ", ins.name)
+                table.insert(allow_instances, ins)
+            end
+        end
+    end
+
     local instances = res_conf.value.plugins[plugin_name].instances
     for i, instance in ipairs(conf.instances) do
         if instance.checks then
@@ -346,8 +365,14 @@ local function pick_target(ctx, conf, ups_tab)
 
     local server_picker = ctx.server_picker
     if not server_picker then
-        server_picker = lrucache_server_picker(ctx.matched_route.key, version,
-                                               create_server_picker, conf, ups_tab, checkers)
+        local key = ctx.matched_route.key
+        if request_model then
+            key = key .. "#" .. request_model
+        end
+        local key_s = tostring(key)
+        core.log.warn("picker key: ", key_s)
+        server_picker = lrucache_server_picker(key, version,
+                                               create_server_picker, conf, allow_instances, ups_tab, checkers)
     end
     if not server_picker then
         return nil, nil, "failed to fetch server picker"
@@ -378,6 +403,9 @@ local function pick_target(ctx, conf, ups_tab)
     end
 
     local instance_conf = get_instance_conf(conf.instances, instance_name)
+    local model = instance_conf.options and instance_conf.options.model or instance_conf.model
+    local endpoint = instance_conf.override and instance_conf.override.endpoint or instance_conf.endpoint
+    core.log.warn("pick target name: ", instance_name, ", target model: ", model, ", target endpoint: ", endpoint)
     return instance_name, instance_conf
 end
 
