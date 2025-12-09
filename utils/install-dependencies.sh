@@ -47,10 +47,10 @@ function install_dependencies_with_yum() {
     sudo yum install -y yum-utils
     sudo yum-config-manager --add-repo "https://openresty.org/package/${1}/openresty.repo"
     if [[ "${1}" == "centos" ]]; then
-        sudo yum -y install centos-release-scl
-        sudo yum -y install devtoolset-9 patch wget
+        #sudo yum -y install centos-release-scl
+        #sudo yum -y install devtoolset-9 patch wget
         set +eu
-        source scl_source enable devtoolset-9
+        #source scl_source enable devtoolset-9
         set -eu
     fi
     sudo yum install -y  \
@@ -121,10 +121,10 @@ function multi_distro_uninstallation() {
 
 function install_apisix_runtime() {
     export runtime_version=${APISIX_RUNTIME:?}
-    wget "https://raw.githubusercontent.com/api7/apisix-build-tools/apisix-runtime/${APISIX_RUNTIME}/build-apisix-runtime.sh"
+    #wget "https://raw.githubusercontent.com/api7/apisix-build-tools/apisix-runtime/${APISIX_RUNTIME}/build-apisix-runtime.sh"
     chmod +x build-apisix-runtime.sh
     ./build-apisix-runtime.sh latest
-    rm build-apisix-runtime.sh
+    #rm build-apisix-runtime.sh
 }
 
 # Install LuaRocks
