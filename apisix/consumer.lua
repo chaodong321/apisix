@@ -249,7 +249,15 @@ function create_consume_cache(consumers_conf, key_attr)
     for _, consumer in ipairs(consumers_conf.nodes) do
         local new_consumer = consumer_lrucache(consumer, nil,
                                 fill_consumer_secret, consumer)
-        consumer_names[new_consumer.auth_conf[key_attr]] = new_consumer
+        if new_consumer and new_consumer.auth_conf[key_attr] then
+            if type(new_consumer.auth_conf[key_attr]) ~= "table" then
+                consumer_names[new_consumer.auth_conf[key_attr]] = new_consumer
+            else
+                for _, key in ipairs(new_consumer.auth_conf[key_attr]) do
+                    consumer_names[key] = new_consumer
+                end
+            end
+        end
     end
 
     return consumer_names

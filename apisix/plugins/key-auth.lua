@@ -41,10 +41,16 @@ local schema = {
 local consumer_schema = {
     type = "object",
     properties = {
-        key = { type = "string" },
+        keys = {
+            type = "array",
+            items = {
+                type = "string",
+            },
+            minItems = 1,
+        },
     },
-    encrypt_fields = {"key"},
-    required = {"key"},
+    encrypt_fields = {"keys"},
+    required = {"keys"},
 }
 
 
@@ -80,7 +86,7 @@ local function find_consumer(ctx, conf)
         return nil, nil, "Missing API key in request"
     end
 
-    local consumer, consumer_conf, err = consumer_mod.find_consumer(plugin_name, "key", key)
+    local consumer, consumer_conf, err = consumer_mod.find_consumer(plugin_name, "keys", key)
     if not consumer then
         core.log.warn("failed to find consumer: ", err or "invalid api key")
         return nil, nil, "Invalid API key in request"
