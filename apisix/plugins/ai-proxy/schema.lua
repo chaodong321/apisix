@@ -80,6 +80,11 @@ local ai_instance_schema = {
                 type = "integer",
                 minimum = 0,
             },
+            api_key_white_list = {
+                type = "array",
+                minItems = 1,
+                items = {type = "string"}
+            },
             auth = auth_schema,
             options = model_options_schema,
             override = {

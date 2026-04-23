@@ -424,6 +424,31 @@ local function pick_ai_instance(ctx, conf, ups_tab)
 end
 
 
+local function is_include(value, tab)
+    for k,v in ipairs(tab) do
+        if v == value then
+            return true
+        end
+    end
+    return false
+end
+
+
+local function check_instance_api_key(ai_instance, api_key)
+    if not api_key or not ai_instance then
+        return
+    end
+
+    core.log.warn("llm allow api keys: ", core.json.encode(ai_instance.api_key_white_list))
+    if ai_instance.api_key_white_list and #ai_instance.api_key_white_list > 0 then
+        local whitelisted = is_include(api_key, ai_instance.api_key_white_list)
+        if not whitelisted then
+            return "API key does not allow in LLM"
+        end
+    end
+end
+
+
 function _M.access(conf, ctx)
     local ups_tab = {}
     local algo = core.table.try_read_attr(conf, "balancer", "algorithm")
@@ -438,6 +463,14 @@ function _M.access(conf, ctx)
     if err then
         return 503, err
     end
+
+    core.log.warn("check llm allow api key, instance name: ", name, " api key: ", ctx.api_key)
+    err = check_instance_api_key(ai_instance, ctx.api_key)
+    if err then
+        core.log.error("fail to check AI instance ", name, " api key: ", err)
+        return 401, err
+    end
+
     ctx.picked_ai_instance_name = name
     ctx.picked_ai_instance = ai_instance
     ctx.balancer_ip = name
@@ -458,6 +491,13 @@ local function retry_on_error(ctx, conf, code)
             core.log.error("failed to pick new AI instance: ", err)
             return 502
         end
+
+        err = check_instance_api_key(ai_instance, ctx.api_key)
+        if err then
+            core.log.error("fail to check AI instance ", name, " api key: ", err)
+            return 401
+        end
+
         ctx.balancer_ip = name
         ctx.picked_ai_instance_name = name
         ctx.picked_ai_instance = ai_instance

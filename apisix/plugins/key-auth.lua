@@ -92,6 +92,8 @@ local function find_consumer(ctx, conf)
         return nil, nil, "Invalid API key in request"
     end
 
+    ctx.api_key = key
+
     if conf.hide_credentials then
         if from_header then
             core.request.set_header(ctx, conf.header, nil)
