@@ -45,9 +45,9 @@ install_openssl_3(){
     ./config $fips \
       shared \
       zlib \
-	  enable-camellia enable-seed enable-rfc3779 \
-	  enable-cms enable-md2 enable-rc5 \
-	  enable-weak-ssl-ciphers \
+          enable-camellia enable-seed enable-rfc3779 \
+          enable-cms enable-md2 enable-rc5 \
+          enable-weak-ssl-ciphers \
       --prefix=$OPENSSL_PREFIX \
       --libdir=lib               \
       --with-zlib-lib=$zlib_prefix/lib \
@@ -77,65 +77,90 @@ mkdir -p $workdir
 cd "$workdir" || exit 1
 
 
+if [ ! -d "$OPENSSL_PREFIX" ]; then
 install_openssl_3
+fi
 
-wget --no-check-certificate https://openresty.org/download/openresty-${OPENRESTY_VERSION}.tar.gz
-tar -zxvpf openresty-${OPENRESTY_VERSION}.tar.gz > /dev/null
+if [ ! -d "openresty-${OPENRESTY_VERSION}" ]; then
+    wget --no-check-certificate https://openresty.org/download/openresty-${OPENRESTY_VERSION}.tar.gz
+    tar -zxvpf openresty-${OPENRESTY_VERSION}.tar.gz > /dev/null
+fi
 
 if [ "$repo" == lua-resty-events ]; then
     cp -r "$prev_workdir" ./lua-resty-events-${lua_resty_events_ver}
 else
+    if [ ! -d "lua-resty-events-${lua_resty_events_ver}" ]; then
     git clone --depth=1 -b $lua_resty_events_ver \
         https://github.com/Kong/lua-resty-events.git \
         lua-resty-events-${lua_resty_events_ver}
+    fi
 fi
 
 if [ "$repo" == ngx_multi_upstream_module ]; then
     cp -r "$prev_workdir" ./ngx_multi_upstream_module-${ngx_multi_upstream_module_ver}
 else
+    if [ ! -d "ngx_multi_upstream_module-${ngx_multi_upstream_module_ver}" ]; then
     git clone --depth=1 -b $ngx_multi_upstream_module_ver \
         https://github.com/api7/ngx_multi_upstream_module.git \
         ngx_multi_upstream_module-${ngx_multi_upstream_module_ver}
+    fi
 fi
 
 if [ "$repo" == mod_dubbo ]; then
     cp -r "$prev_workdir" ./mod_dubbo-${mod_dubbo_ver}
 else
+    if [ ! -d "mod_dubbo-${mod_dubbo_ver}" ]; then
     git clone --depth=1 -b $mod_dubbo_ver \
         https://github.com/api7/mod_dubbo.git \
         mod_dubbo-${mod_dubbo_ver}
+    fi
 fi
 
 if [ "$repo" == apisix-nginx-module ]; then
     cp -r "$prev_workdir" ./apisix-nginx-module-${apisix_nginx_module_ver}
 else
+    if [ ! -d "apisix-nginx-module-${apisix_nginx_module_ver}" ]; then
     git clone --depth=1 -b $apisix_nginx_module_ver \
         https://github.com/api7/apisix-nginx-module.git \
         apisix-nginx-module-${apisix_nginx_module_ver}
+    fi
 fi
 
 if [ "$repo" == wasm-nginx-module ]; then
     cp -r "$prev_workdir" ./wasm-nginx-module-${wasm_nginx_module_ver}
 else
+    if [ ! -d "wasm-nginx-module-${wasm_nginx_module_ver}" ]; then
     git clone --depth=1 -b $wasm_nginx_module_ver \
         https://github.com/api7/wasm-nginx-module.git \
         wasm-nginx-module-${wasm_nginx_module_ver}
+    fi
 fi
 
 if [ "$repo" == lua-var-nginx-module ]; then
     cp -r "$prev_workdir" ./lua-var-nginx-module-${lua_var_nginx_module_ver}
 else
+    if [ ! -d "lua-var-nginx-module-${lua_var_nginx_module_ver}" ]; then
     git clone --depth=1 -b $lua_var_nginx_module_ver \
         https://github.com/api7/lua-var-nginx-module \
         lua-var-nginx-module-${lua_var_nginx_module_ver}
+    fi
 fi
 
 #zcd: download http connect proxy module
 if [ "$repo" !=  ngx_http_proxy_connect_module ]; then
+    if [ ! -d "ngx_http_proxy_connect_module" ]; then
     git clone --depth=1 \
         https://github.com/chobits/ngx_http_proxy_connect_module.git \
         ngx_http_proxy_connect_module
+    fi
 fi
+
+
+cd openresty-${OPENRESTY_VERSION} || exit 1
+tar -zxf /home/zcd/gateway_build/luajit2-2.1-20251030-loongarch64.tar.gz -C bundle
+rm -rf bundle/LuaJIT-2.1-20250117
+mv bundle/luajit2-2.1-20251030-loongarch64 bundle/LuaJIT-2.1-20250117
+cd ..
 
 cd ngx_multi_upstream_module-${ngx_multi_upstream_module_ver} || exit 1
 ./patch.sh ../openresty-${OPENRESTY_VERSION}
@@ -146,7 +171,8 @@ cd apisix-nginx-module-${apisix_nginx_module_ver}/patch || exit 1
 cd ../..
 
 cd wasm-nginx-module-${wasm_nginx_module_ver} || exit 1
-./install-wasmtime.sh
+#./install-wasmtime.sh
+cp -rf /home/zcd/gateway_build/wasmtime-c-api ./
 cd ..
 
 
@@ -233,17 +259,17 @@ cd wasm-nginx-module-${wasm_nginx_module_ver} || exit 1
 sudo OPENRESTY_PREFIX="$OR_PREFIX" make install
 cd ..
 
-# package etcdctl
-ETCD_ARCH="amd64"
-ETCD_VERSION=${ETCD_VERSION:-'3.5.4'}
-ARCH=${ARCH:-$(uname -m | tr '[:upper:]' '[:lower:]')}
-
-if [[ $ARCH == "arm64" ]] || [[ $ARCH == "aarch64" ]]; then
-    ETCD_ARCH="arm64"
-fi
-
-wget -q https://github.com/etcd-io/etcd/releases/download/v${ETCD_VERSION}/etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}.tar.gz
-tar xf etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}.tar.gz
-# ship etcdctl under the same bin dir of openresty so we can package it easily
-sudo cp etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}/etcdctl "$OR_PREFIX"/bin/
-rm -rf etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}
+## package etcdctl
+#ETCD_ARCH="amd64"
+#ETCD_VERSION=${ETCD_VERSION:-'3.5.4'}
+#ARCH=${ARCH:-$(uname -m | tr '[:upper:]' '[:lower:]')}
+#
+#if [[ $ARCH == "arm64" ]] || [[ $ARCH == "aarch64" ]]; then
+#    ETCD_ARCH="arm64"
+#fi
+#
+#wget -q https://github.com/etcd-io/etcd/releases/download/v${ETCD_VERSION}/etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}.tar.gz
+#tar xf etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}.tar.gz
+## ship etcdctl under the same bin dir of openresty so we can package it easily
+#sudo cp etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}/etcdctl "$OR_PREFIX"/bin/
+#rm -rf etcd-v${ETCD_VERSION}-linux-${ETCD_ARCH}

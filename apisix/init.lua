@@ -17,13 +17,34 @@
 local require         = require
 -- set the JIT options before any code, to prevent error "changing jit stack size is not
 -- allowed when some regexs have already been compiled and cached"
-if require("ffi").os == "Linux" then
-    require("ngx.re").opt("jit_stack_size", 200 * 1024)
+
+local function get_arch()
+    local arch = require("ffi").arch
+    if arch == "loongarch64" or arch == "la64" or arch == "le64" then
+        return "loongarch"
+    end
+
+    local buf = require("ffi").new("struct utsname")
+    if require("ffi").C.uname(buf) == 0 then
+        local machine = require("ffi").string(buf.machine)
+        if string.find(machine, "loongarch") then
+            return "loongarch"
+        end
+    end
+    return arch
 end
 
-require("jit.opt").start("minstitch=2", "maxtrace=4000",
-                         "maxrecord=8000", "sizemcode=64",
-                         "maxmcode=4000", "maxirconst=1000")
+local current_arch = get_arch()
+
+if current_arch ~= "loongarch" then
+    if require("ffi").os == "Linux" then
+        require("ngx.re").opt("jit_stack_size", 200 * 1024)
+    end
+
+    require("jit.opt").start("minstitch=2", "maxtrace=4000",
+                             "maxrecord=8000", "sizemcode=64",
+                             "maxmcode=4000", "maxirconst=1000")
+end
 
 require("apisix.patch").patch()
 local core            = require("apisix.core")

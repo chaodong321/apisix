@@ -81,12 +81,20 @@ function install_dependencies_with_apt() {
     sudo apt-get install -y curl make gcc g++ cpanminus libpcre3 libpcre3-dev libyaml-dev unzip openresty-zlib-dev openresty-pcre-dev
 }
 
+# Install dependencies on kylin
+function install_dependencies_with_kylin_yum() {
+    yum install -y patch wget unzip xz gnupg perl-ExtUtils-Embed libyaml-devel perl perl-devel pcre pcre-devel openldap-devel
+    echo "skip dpendency"
+}
+
 # Identify the different distributions and call the corresponding function
 function multi_distro_installation() {
     if grep -Eqi "CentOS" /etc/issue || grep -Eq "CentOS" /etc/*-release; then
         install_dependencies_with_yum "centos"
     elif grep -Eqi -e "Red Hat" -e "rhel" /etc/*-release; then
         install_dependencies_with_yum "rhel"
+    elif grep -Eqi -e "kylin" /etc/*-release; then
+        install_dependencies_with_kylin_yum
     elif grep -Eqi "Fedora" /etc/issue || grep -Eq "Fedora" /etc/*-release; then
         install_dependencies_with_yum "fedora"
     elif grep -Eqi "Debian" /etc/issue || grep -Eq "Debian" /etc/*-release; then
