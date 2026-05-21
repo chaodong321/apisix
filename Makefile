@@ -40,7 +40,7 @@ ENV_DOCKER             ?= docker
 ENV_DOCKER_COMPOSE     ?= docker compose --project-directory $(CURDIR) -p $(project_name) -f $(project_compose_ci)
 ENV_NGINX              ?= $(ENV_NGINX_EXEC) -p $(CURDIR) -c $(CURDIR)/conf/nginx.conf
 ENV_NGINX_EXEC         := $(shell command -v openresty 2>/dev/null || command -v nginx 2>/dev/null)
-ENV_OPENSSL_PREFIX     ?= /usr/local/openresty/openssl3
+ENV_OPENSSL_PREFIX     ?= /usr/local/topsec_aigw/openresty/openssl3
 ENV_LIBYAML_INSTALL_PREFIX ?= /usr
 ENV_LUAROCKS           ?= luarocks
 ## These variables can be injected by luarocks
@@ -108,11 +108,11 @@ endef
 .PHONY: runtime
 runtime:
 ifeq ($(ENV_NGINX_EXEC), )
-ifeq ("$(wildcard /usr/local/openresty/bin/openresty)", "")
+ifeq ("$(wildcard /usr/local/topsec_aigw/openresty/bin/openresty)", "")
 	@$(call func_echo_warn_status, "WARNING: OpenResty not found. You have to install OpenResty and add the binary file to PATH before install Apache APISIX.")
 	exit 1
 else
-	$(eval ENV_NGINX_EXEC := /usr/local/openresty/bin/openresty)
+	$(eval ENV_NGINX_EXEC := /usr/local/topsec_aigw/openresty/bin/openresty)
 	@$(call func_echo_status, "Use openresty as default runtime")
 endif
 endif
@@ -237,25 +237,25 @@ reload: runtime
 install-runtime:
 ifneq ($(ENV_RUNTIME_VER), $(APISIX_RUNTIME))
 	./utils/install-dependencies.sh
-	@sudo $(ENV_INSTALL) /usr/local/openresty/bin/openresty $(ENV_INST_BINDIR)/openresty
+	@sudo $(ENV_INSTALL) /usr/local/topsec_aigw/openresty/bin/openresty $(ENV_INST_BINDIR)/openresty
 endif
 
 .PHONY: uninstall-runtime
 uninstall-runtime:
 	./utils/install-dependencies.sh uninstall
-	rm -rf /usr/local/openresty
+	rm -rf /usr/local/topsec_aigw/openresty
 	rm -f $(ENV_INST_BINDIR)/openresty
 
 ### install : Install the apisix (only for luarocks)
 .PHONY: install
 install: runtime
-	$(ENV_INSTALL) -d /usr/local/apisix/
-	$(ENV_INSTALL) -d /usr/local/apisix/logs/
-	$(ENV_INSTALL) -d /usr/local/apisix/conf/cert
-	$(ENV_INSTALL) conf/mime.types /usr/local/apisix/conf/mime.types
-	$(ENV_INSTALL) conf/config.yaml /usr/local/apisix/conf/config.yaml
-	$(ENV_INSTALL) conf/debug.yaml /usr/local/apisix/conf/debug.yaml
-	$(ENV_INSTALL) conf/cert/* /usr/local/apisix/conf/cert/
+	$(ENV_INSTALL) -d /usr/local/topsec_aigw/
+	$(ENV_INSTALL) -d /usr/local/topsec_aigw/logs/
+	$(ENV_INSTALL) -d /usr/local/topsec_aigw/conf/cert
+	$(ENV_INSTALL) conf/mime.types /usr/local/topsec_aigw/conf/mime.types
+	$(ENV_INSTALL) conf/config.yaml /usr/local/topsec_aigw/conf/config.yaml
+	$(ENV_INSTALL) conf/debug.yaml /usr/local/topsec_aigw/conf/debug.yaml
+	$(ENV_INSTALL) conf/cert/* /usr/local/topsec_aigw/conf/cert/
 
 	# directories listed in alphabetical order
 	$(ENV_INSTALL) -d $(ENV_INST_LUADIR)/apisix
