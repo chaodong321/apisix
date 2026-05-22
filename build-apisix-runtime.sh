@@ -10,7 +10,7 @@ ENABLE_FIPS=${ENABLE_FIPS:-"false"}
 OPENSSL_CONF_PATH=${OPENSSL_CONF_PATH:-$PWD/conf/openssl3/openssl.cnf}
 
 
-OR_PREFIX=${OR_PREFIX:="/usr/local/openresty"}
+OR_PREFIX=${OR_PREFIX:="/usr/local/topsec_aigw/openresty"}
 OPENSSL_PREFIX=${OPENSSL_PREFIX:=$OR_PREFIX/openssl3}
 zlib_prefix=${OR_PREFIX}/zlib
 pcre_prefix=${OR_PREFIX}/pcre
