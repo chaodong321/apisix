@@ -19,7 +19,7 @@ set -ex
 
 # you might need sudo to run this script
 if [ -z ${OPENRESTY_PREFIX} ]; then
-    OPENRESTY_PREFIX="/usr/local/openresty"
+    OPENRESTY_PREFIX="/usr/local/topsec_aigw/openresty"
 fi
 
 LUAROCKS_VER=3.12.0
