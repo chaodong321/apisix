@@ -17,11 +17,11 @@
 require("resty.aws.config") -- to read env vars before initing aws module
 
 local core = require("apisix.core")
+local binding = require("apisix.plugins.ai-protocols.binding")
 local aws = require("resty.aws")
 local aws_instance
 
 local http = require("resty.http")
-local fetch_secrets = require("apisix.secret").fetch_secrets
 
 local pairs = pairs
 local unpack = unpack
@@ -68,8 +68,10 @@ local schema = {
             minimum = 0,
             maximum = 1,
             default = 0.5
-        }
+        },
+        fail_mode = binding.schema_property("skip"),
     },
+    encrypt_fields = { "comprehend.secret_access_key" },
     required = { "comprehend" },
 }
 
@@ -88,9 +90,21 @@ end
 
 
 function _M.rewrite(conf, ctx)
-    conf = fetch_secrets(conf, true)
-    if not conf then
-        return HTTP_INTERNAL_SERVER_ERROR, "failed to retrieve secrets from conf"
+    -- Consumer-bound moderation may receive non-AI traffic (e.g. multipart/binary
+    -- uploads) whose body can't be moderated as text. Govern that via fail_mode.
+    local ct = core.request.header(ctx, "Content-Type")
+    -- media types are case-insensitive, normalize before matching
+    ct = ct and ct:lower()
+    if ct and not core.string.has_prefix(ct, "application/json") then
+        local handled, code, resp = binding.on_unsupported(
+            conf.fail_mode, _M.name, ctx,
+            "unsupported content-type: " .. ct,
+            HTTP_BAD_REQUEST, "unsupported content-type: " .. ct
+                .. ", only application/json is supported")
+        if handled then
+            return code, resp
+        end
+        return
     end
 
     local body, err = core.request.get_body()

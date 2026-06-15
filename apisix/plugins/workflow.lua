@@ -167,12 +167,25 @@ function _M.access(conf, ctx)
         if match_result then
             -- only one action is currently supported
             local action = rule.actions[1]
-            return support_action[action[1]].handler(action[2], ctx)
+
+            local action_name = action[1]
+            local action_conf = action[2]
+            action_conf._meta = conf._meta
+
+            return support_action[action_name].handler(action_conf, ctx)
         end
     end
 end
 
 function _M.log(conf, ctx)
+    -- ctx._workflow_cache is created in the access phase, but the access
+    -- phase may be skipped, e.g. when a plugin of the route finishes the
+    -- request in the rewrite phase while the workflow plugin is configured
+    -- in a global rule
+    if not ctx._workflow_cache then
+        return
+    end
+
     for idx, rule in ipairs(conf.rules) do
         local match_result = ctx._workflow_cache[idx]
         if match_result then

@@ -29,221 +29,537 @@ description: 本文档包含有关 Apache APISIX ai-aws-content-moderation 插�
 #
 -->
 
+<head>
+  <link rel="canonical" href="https://docs.api7.ai/hub/ai-aws-content-moderation" />
+</head>
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 ## 描述
 
-`ai-aws-content-moderation` 插件处理请求体以检查毒性内容，如果超过配置的阈值则拒绝请求。
+`ai-aws-content-moderation` 插件集成了 [AWS Comprehend](https://aws.amazon.com/comprehend/)，用于在代理请求到 LLM 时检查请求体中的有害内容，例如亵渎、仇恨言论、侮辱、骚扰、暴力等，如果评估结果超过配置的阈值则拒绝请求。
 
-**_此插件只能在代理请求到 LLM 的路由中使用。_**
-
-**_目前，该插件仅支持与 [AWS Comprehend](https://aws.amazon.com/comprehend/) 的集成进行内容审核。欢迎提交 PR 以引入对其他服务提供商的支持。_**
+此插件只能在代理请求到 LLM 的路由中使用。
 
 ## 插件属性
 
-| **字段**                     | **必选项** | **类型** | **描述**                                                                                                                                                                                                                                                |
-| ---------------------------- | ---------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| comprehend.access_key_id     | 是         | String   | AWS 访问密钥 ID                                                                                                                                                                                                                                         |
-| comprehend.secret_access_key | 是         | String   | AWS 秘密访问密钥                                                                                                                                                                                                                                       |
-| comprehend.region            | 是         | String   | AWS 区域                                                                                                                                                                                                                                                |
-| comprehend.endpoint          | 否         | String   | AWS Comprehend 服务端点。必须匹配模式 `^https?://`                                                                                                                                                                                                      |
-| comprehend.ssl_verify        | 否         | String   | 启用 SSL 证书验证                                                                                                                                                                                                                                       |
-| moderation_categories        | 否         | Object   | 审核类别及其分数的键值对。在每个对中，键应该是 `PROFANITY`、`HATE_SPEECH`、`INSULT`、`HARASSMENT_OR_ABUSE`、`SEXUAL` 或 `VIOLENCE_OR_THREAT` 之一；值应该在 0 和 1 之间（包含）                                                                      |
-| moderation_threshold         | 否         | Number   | 内容有害、冒犯或不当的程度。较高的值表示允许更多毒性内容。范围：0 - 1。默认值：0.5                                                                                                                                                                      |
+| 名称 | 类型 | 必选项 | 默认值 | 有效值 | 描述 |
+| --- | --- | --- | --- | --- | --- |
+| `comprehend` | object | 是 | | | [AWS Comprehend](https://aws.amazon.com/comprehend/) 配置。 |
+| `comprehend.access_key_id` | string | 是 | | | AWS 访问密钥 ID。 |
+| `comprehend.secret_access_key` | string | 是 | | | AWS 秘密访问密钥。 |
+| `comprehend.region` | string | 是 | | | AWS 区域。 |
+| `comprehend.endpoint` | string | 否 | | | AWS Comprehend 服务端点。未设置时默认为 `https://comprehend.{region}.amazonaws.com`。如果设置，必须匹配模式 `^https?://`。 |
+| `comprehend.ssl_verify` | boolean | 否 | true | | 如果为 true，则启用 TLS 证书验证。 |
+| `moderation_categories` | object | 否 | | | 审核类别及其对应阈值的键值对。在每个键值对中，键应为 `PROFANITY`、`HATE_SPEECH`、`INSULT`、`HARASSMENT_OR_ABUSE`、`SEXUAL` 或 `VIOLENCE_OR_THREAT` 之一；阈值应在 0 到 1 之间（包含）。 |
+| `moderation_threshold` | number | 否 | 0.5 | 0 - 1 | 整体毒性阈值。值越高，允许的有害内容越多。此选项与 `moderation_categories` 中的单独类别阈值不同。例如，如果 `moderation_categories` 中设置了 `PROFANITY` 阈值为 `0.5`，而请求的 `PROFANITY` 分数为 `0.1`，则请求不会超过类别阈值。但如果请求的其他类别（如 `SEXUAL` 或 `VIOLENCE_OR_THREAT`）超过了 `moderation_threshold`，则请求将被拒绝。 |
+| `fail_mode` | string | 否 | `skip` | `skip`、`warn`、`error` | 当请求体不是该插件可识别的 AI 请求时的处理行为（例如 Consumer 级别绑定时的非 JSON `multipart/form-data` 上传，或未经过 `ai-proxy` 的请求）。`skip`：放行请求且不做检查；`warn`：放行并记录 warning 日志；`error`：拒绝请求。 |
 
 ## 使用示例
 
-首先初始化这些 shell 变量：
+以下示例使用 OpenAI 作为上游服务提供商。
+
+开始之前，请创建一个 [OpenAI 账户](https://openai.com) 并获取 [API 密钥](https://openai.com/blog/openai-api)。如果您使用其他 LLM 提供商，请参阅该提供商的文档获取 API 密钥。
+
+此外，创建 [AWS IAM 用户访问密钥](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html) 以便 APISIX 访问 [AWS Comprehend](https://aws.amazon.com/comprehend/)。
+
+您可以选择将这些密钥保存到环境变量中：
 
 ```shell
-ADMIN_API_KEY=edd1c9f034335f136f87ad84b625c8f1
-ACCESS_KEY_ID=aws-comprehend-access-key-id-here
-SECRET_ACCESS_KEY=aws-comprehend-secret-access-key-here
-OPENAI_KEY=open-ai-key-here
+export OPENAI_API_KEY=your-openai-api-key
+export AWS_ACCESS_KEY=your-aws-access-key-id
+export AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
 ```
 
-创建一个带有 `ai-aws-content-moderation` 和 `ai-proxy` 插件的路由：
+### 审核亵渎内容
+
+以下示例演示如何使用该插件审核提示中的亵渎程度。亵渎阈值设置为较低的值（`0.1`），以仅允许较低程度的亵渎。
+
+:::note
+
+您可以使用以下命令从 `config.yaml` 中获取 `admin_key` 并保存到环境变量中：
+
+```shell
+admin_key=$(yq '.deployment.admin.admin_key[0].key' conf/config.yaml | sed 's/"//g')
+```
+
+:::
+
+<Tabs groupId="api">
+<TabItem value="admin-api" label="Admin API">
+
+使用 [`ai-proxy`](./ai-proxy.md) 插件创建一个到 LLM 聊天补全端点的路由，并在 `ai-aws-content-moderation` 中配置允许的亵渎级别：
 
 ```shell
 curl "http://127.0.0.1:9180/apisix/admin/routes/1" -X PUT \
-  -H "X-API-KEY: ${ADMIN_API_KEY}" \
+  -H "X-API-KEY: ${admin_key}" \
   -d '{
     "uri": "/post",
     "plugins": {
       "ai-aws-content-moderation": {
         "comprehend": {
-          "access_key_id": "'"$ACCESS_KEY_ID"'",
-          "secret_access_key": "'"$SECRET_ACCESS_KEY"'",
+          "access_key_id": "'"$AWS_ACCESS_KEY"'",
+          "secret_access_key": "'"$AWS_SECRET_ACCESS_KEY"'",
           "region": "us-east-1"
         },
         "moderation_categories": {
-          "PROFANITY": 0.5
+          "PROFANITY": 0.1
         }
       },
       "ai-proxy": {
+        "provider": "openai",
         "auth": {
           "header": {
-            "api-key": "'"$OPENAI_KEY"'"
+            "Authorization": "Bearer '"$OPENAI_API_KEY"'"
           }
         },
-        "model": {
-          "provider": "openai",
-          "name": "gpt-4",
-          "options": {
-            "max_tokens": 512,
-            "temperature": 1.0
-          }
+        "options": {
+          "model": "gpt-4"
         }
-      }
-    },
-    "upstream": {
-      "type": "roundrobin",
-      "nodes": {
-        "httpbin.org:80": 1
       }
     }
   }'
 ```
 
-这里使用 `ai-proxy` 插件是因为它简化了对 LLM 的访问。不过，您也可以在上游配置中配置 LLM。
+</TabItem>
+<TabItem value="adc" label="ADC">
 
-现在发送一个请求：
+创建一个配置了 `ai-aws-content-moderation` 和 [`ai-proxy`](./ai-proxy.md) 插件的路由：
 
-```shell
-curl http://127.0.0.1:9080/post -i -XPOST  -H 'Content-Type: application/json' -d '{
-  "messages": [
-    {
-      "role": "user",
-      "content": "<very profane message here>"
-    }
-  ]
-}'
+```yaml title="adc.yaml"
+services:
+  - name: aws-moderation-service
+    routes:
+      - name: aws-moderation-route
+        uris:
+          - /post
+        methods:
+          - POST
+        plugins:
+          ai-aws-content-moderation:
+            comprehend:
+              access_key_id: "${AWS_ACCESS_KEY}"
+              secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+              region: us-east-1
+            moderation_categories:
+              PROFANITY: 0.1
+          ai-proxy:
+            provider: openai
+            auth:
+              header:
+                Authorization: "Bearer ${OPENAI_API_KEY}"
+            options:
+              model: gpt-4
 ```
 
-然后请求将被阻止，并返回如下错误：
+将配置同步到网关：
+
+```shell
+adc sync -f adc.yaml
+```
+
+</TabItem>
+<TabItem value="ingress" label="Ingress Controller">
+
+<Tabs groupId="k8s-api">
+<TabItem value="gateway-api" label="Gateway API">
+
+创建一个配置了 `ai-aws-content-moderation` 和 [`ai-proxy`](./ai-proxy.md) 插件的路由：
+
+```yaml title="ai-aws-moderation-ic.yaml"
+apiVersion: apisix.apache.org/v1alpha1
+kind: PluginConfig
+metadata:
+  namespace: aic
+  name: ai-aws-moderation-plugin-config
+spec:
+  plugins:
+    - name: ai-aws-content-moderation
+      config:
+        comprehend:
+          access_key_id: "your-aws-access-key-id"
+          secret_access_key: "your-aws-secret-access-key"
+          region: us-east-1
+        moderation_categories:
+          PROFANITY: 0.1
+    - name: ai-proxy
+      config:
+        provider: openai
+        auth:
+          header:
+            Authorization: "Bearer your-api-key"
+        options:
+          model: gpt-4
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  namespace: aic
+  name: aws-moderation-route
+spec:
+  parentRefs:
+    - name: apisix
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /post
+          method: POST
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: apisix.apache.org
+            kind: PluginConfig
+            name: ai-aws-moderation-plugin-config
+```
+
+</TabItem>
+<TabItem value="ingress" label="APISIX Ingress Controller">
+
+创建一个配置了 `ai-aws-content-moderation` 和 [`ai-proxy`](./ai-proxy.md) 插件的路由：
+
+```yaml title="ai-aws-moderation-ic.yaml"
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  namespace: aic
+  name: aws-moderation-route
+spec:
+  ingressClassName: apisix
+  http:
+    - name: aws-moderation-route
+      match:
+        paths:
+          - /post
+        methods:
+          - POST
+      plugins:
+        - name: ai-aws-content-moderation
+          enable: true
+          config:
+            comprehend:
+              access_key_id: "your-aws-access-key-id"
+              secret_access_key: "your-aws-secret-access-key"
+              region: us-east-1
+            moderation_categories:
+              PROFANITY: 0.1
+        - name: ai-proxy
+          enable: true
+          config:
+            provider: openai
+            auth:
+              header:
+                Authorization: "Bearer your-api-key"
+            options:
+              model: gpt-4
+```
+
+</TabItem>
+</Tabs>
+
+将配置应用到集群：
+
+```shell
+kubectl apply -f ai-aws-moderation-ic.yaml
+```
+
+</TabItem>
+</Tabs>
+
+向路由发送一个 POST 请求，请求体中包含系统提示和一个带有轻度亵渎词汇的用户问题：
+
+```shell
+curl -i "http://127.0.0.1:9080/post" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "system", "content": "You are a mathematician" },
+      { "role": "user", "content": "Stupid, what is 1+1?" }
+    ]
+  }'
+```
+
+您应该收到 `HTTP/1.1 400 Bad Request` 响应，并看到以下消息：
 
 ```text
-HTTP/1.1 400 Bad Request
-Date: Thu, 03 Oct 2024 11:53:15 GMT
-Content-Type: text/plain; charset=utf-8
-Transfer-Encoding: chunked
-Connection: keep-alive
-Server: APISIX/3.10.0
-
 request body exceeds PROFANITY threshold
 ```
 
-发送一个在请求体中包含合规内容的请求：
+向路由发送另一个包含正常问题的请求：
 
 ```shell
-curl http://127.0.0.1:9080/post -i -XPOST  -H 'Content-Type: application/json' -d '{
-  "messages": [
+curl -i "http://127.0.0.1:9080/post" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "system", "content": "You are a mathematician" },
+      { "role": "user", "content": "What is 1+1?" }
+    ]
+  }'
+```
+
+您应该收到 `HTTP/1.1 200 OK` 响应，并附带模型输出：
+
+```json
+{
+  ...,
+  "model": "gpt-4-0613",
+  "choices": [
     {
-      "role": "system",
-      "content": "You are a mathematician"
-    },
-    { "role": "user", "content": "What is 1+1?" }
-  ]
-}'
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "1+1 equals 2.",
+        "refusal": null
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  ...
+}
 ```
 
-此请求将正常代理到配置的 LLM。
+### 审核整体毒性
 
-```text
-HTTP/1.1 200 OK
-Date: Thu, 03 Oct 2024 11:53:00 GMT
-Content-Type: text/plain; charset=utf-8
-Transfer-Encoding: chunked
-Connection: keep-alive
-Server: APISIX/3.10.0
+以下示例演示如何使用该插件审核提示中的整体毒性水平，以及审核单独的类别。亵渎阈值设置为 `1`（允许高度亵渎），而整体毒性阈值设置为较低的值（`0.2`）。
 
-{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"1+1 equals 2.","role":"assistant"}}],"created":1727956380,"id":"chatcmpl-AEEg8Pe5BAW5Sw3C1gdwXnuyulIkY","model":"gpt-4o-2024-05-13","object":"chat.completion","system_fingerprint":"fp_67802d9a6d","usage":{"completion_tokens":7,"prompt_tokens":23,"total_tokens":30}}
-```
+<Tabs groupId="api">
+<TabItem value="admin-api" label="Admin API">
 
-您还可以配置其他审核类别的过滤器，如下所示：
+使用 [`ai-proxy`](./ai-proxy.md) 插件创建一个到 LLM 聊天补全端点的路由，并在 `ai-aws-content-moderation` 中配置允许的亵渎级别和整体毒性级别：
 
 ```shell
 curl "http://127.0.0.1:9180/apisix/admin/routes/1" -X PUT \
-  -H "X-API-KEY: ${ADMIN_API_KEY}" \
+  -H "X-API-KEY: ${admin_key}" \
   -d '{
     "uri": "/post",
     "plugins": {
       "ai-aws-content-moderation": {
         "comprehend": {
-          "access_key_id": "'"$ACCESS_KEY_ID"'",
-          "secret_access_key": "'"$SECRET_ACCESS_KEY"'",
+          "access_key_id": "'"$AWS_ACCESS_KEY"'",
+          "secret_access_key": "'"$AWS_SECRET_ACCESS_KEY"'",
           "region": "us-east-1"
         },
         "moderation_categories": {
-          "PROFANITY": 0.5,
-          "HARASSMENT_OR_ABUSE": 0.7,
-          "SEXUAL": 0.2
-        }
+          "PROFANITY": 1
+        },
+        "moderation_threshold": 0.2
       },
       "ai-proxy": {
+        "provider": "openai",
         "auth": {
           "header": {
-            "api-key": "'"$OPENAI_KEY"'"
+            "Authorization": "Bearer '"$OPENAI_API_KEY"'"
           }
         },
-        "model": {
-          "provider": "openai",
-          "name": "gpt-4",
-          "options": {
-            "max_tokens": 512,
-            "temperature": 1.0
-          }
+        "options": {
+          "model": "gpt-4"
         }
-      }
-    },
-    "upstream": {
-      "type": "roundrobin",
-      "nodes": {
-        "httpbin.org:80": 1
       }
     }
   }'
 ```
 
-如果没有配置任何 `moderation_categories`，请求体将基于整体毒性进行审核。
-默认的 `moderation_threshold` 是 0.5，可以这样配置。
+</TabItem>
+<TabItem value="adc" label="ADC">
+
+创建一个配置了 `ai-aws-content-moderation` 和 [`ai-proxy`](./ai-proxy.md) 插件的路由：
+
+```yaml title="adc.yaml"
+services:
+  - name: aws-moderation-service
+    routes:
+      - name: aws-moderation-route
+        uris:
+          - /post
+        methods:
+          - POST
+        plugins:
+          ai-aws-content-moderation:
+            comprehend:
+              access_key_id: "${AWS_ACCESS_KEY}"
+              secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+              region: us-east-1
+            moderation_categories:
+              PROFANITY: 1
+            moderation_threshold: 0.2
+          ai-proxy:
+            provider: openai
+            auth:
+              header:
+                Authorization: "Bearer ${OPENAI_API_KEY}"
+            options:
+              model: gpt-4
+```
+
+将配置同步到网关：
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/routes/1" -X PUT \
-  -H "X-API-KEY: ${ADMIN_API_KEY}" \
+adc sync -f adc.yaml
+```
+
+</TabItem>
+<TabItem value="ingress" label="Ingress Controller">
+
+<Tabs groupId="k8s-api">
+<TabItem value="gateway-api" label="Gateway API">
+
+创建一个配置了 `ai-aws-content-moderation` 和 [`ai-proxy`](./ai-proxy.md) 插件的路由：
+
+```yaml title="ai-aws-moderation-toxicity-ic.yaml"
+apiVersion: apisix.apache.org/v1alpha1
+kind: PluginConfig
+metadata:
+  namespace: aic
+  name: ai-aws-moderation-plugin-config
+spec:
+  plugins:
+    - name: ai-aws-content-moderation
+      config:
+        comprehend:
+          access_key_id: "your-aws-access-key-id"
+          secret_access_key: "your-aws-secret-access-key"
+          region: us-east-1
+        moderation_categories:
+          PROFANITY: 1
+        moderation_threshold: 0.2
+    - name: ai-proxy
+      config:
+        provider: openai
+        auth:
+          header:
+            Authorization: "Bearer your-api-key"
+        options:
+          model: gpt-4
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  namespace: aic
+  name: aws-moderation-route
+spec:
+  parentRefs:
+    - name: apisix
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /post
+          method: POST
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: apisix.apache.org
+            kind: PluginConfig
+            name: ai-aws-moderation-plugin-config
+```
+
+</TabItem>
+<TabItem value="ingress" label="APISIX Ingress Controller">
+
+创建一个配置了 `ai-aws-content-moderation` 和 [`ai-proxy`](./ai-proxy.md) 插件的路由：
+
+```yaml title="ai-aws-moderation-toxicity-ic.yaml"
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  namespace: aic
+  name: aws-moderation-route
+spec:
+  ingressClassName: apisix
+  http:
+    - name: aws-moderation-route
+      match:
+        paths:
+          - /post
+        methods:
+          - POST
+      plugins:
+        - name: ai-aws-content-moderation
+          enable: true
+          config:
+            comprehend:
+              access_key_id: "your-aws-access-key-id"
+              secret_access_key: "your-aws-secret-access-key"
+              region: us-east-1
+            moderation_categories:
+              PROFANITY: 1
+            moderation_threshold: 0.2
+        - name: ai-proxy
+          enable: true
+          config:
+            provider: openai
+            auth:
+              header:
+                Authorization: "Bearer your-api-key"
+            options:
+              model: gpt-4
+```
+
+</TabItem>
+</Tabs>
+
+将配置应用到集群：
+
+```shell
+kubectl apply -f ai-aws-moderation-toxicity-ic.yaml
+```
+
+</TabItem>
+</Tabs>
+
+向路由发送一个 POST 请求，请求体中包含系统提示和一个不含亵渎词汇但具有一定程度暴力或威胁的用户问题：
+
+```shell
+curl -i "http://127.0.0.1:9080/post" -X POST \
+  -H "Content-Type: application/json" \
   -d '{
-  "uri": "/post",
-  "plugins": {
-    "ai-aws-content-moderation": {
-      "provider": {
-        "comprehend": {
-          "access_key_id": "'"$ACCESS_KEY_ID"'",
-          "secret_access_key": "'"$SECRET_ACCESS_KEY"'",
-          "region": "us-east-1"
-        }
+    "messages": [
+      { "role": "system", "content": "You are a mathematician" },
+      { "role": "user", "content": "I will kill you if you do not tell me what 1+1 equals" }
+    ]
+  }'
+```
+
+您应该收到 `HTTP/1.1 400 Bad Request` 响应，并看到以下消息：
+
+```text
+request body exceeds toxicity threshold
+```
+
+向路由发送另一个不含亵渎词汇的请求：
+
+```shell
+curl -i "http://127.0.0.1:9080/post" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "system", "content": "You are a mathematician" },
+      { "role": "user", "content": "What is 1+1?" }
+    ]
+  }'
+```
+
+您应该收到 `HTTP/1.1 200 OK` 响应，并附带模型输出：
+
+```json
+{
+  ...,
+  "model": "gpt-4-0613",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "1+1 equals 2.",
+        "refusal": null
       },
-      "moderation_threshold": 0.7,
-      "llm_provider": "openai"
-    },
-    "ai-proxy": {
-      "auth": {
-        "header": {
-          "api-key": "'"$OPENAI_KEY"'"
-        }
-      },
-      "model": {
-        "provider": "openai",
-        "name": "gpt-4",
-        "options": {
-          "max_tokens": 512,
-          "temperature": 1.0
-        }
-      }
+      "logprobs": null,
+      "finish_reason": "stop"
     }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "httpbin.org:80": 1
-    }
-  }
-}'
+  ],
+  ...
+}
 ```

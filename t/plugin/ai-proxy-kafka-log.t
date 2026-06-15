@@ -23,158 +23,47 @@ no_long_string();
 no_root_location();
 
 
-my $resp_file = 't/assets/ai-proxy-response.json';
-open(my $fh, '<', $resp_file) or die "Could not open file '$resp_file' $!";
-my $resp = do { local $/; <$fh> };
-close($fh);
-
-print "Hello, World!\n";
-print $resp;
-
-
 add_block_preprocessor(sub {
     my ($block) = @_;
 
     if (!defined $block->request) {
         $block->set_value("request", "GET /t");
     }
+});
 
-    my $http_config = $block->http_config // <<_EOC_;
-        server {
-            server_name openai;
-            listen 6724;
+add_block_preprocessor(sub {
+    my ($block) = @_;
 
-            default_type 'application/json';
-
-            location /v1/chat/completions {
-                content_by_lua_block {
-                    local json = require("cjson.safe")
-
-                    if ngx.req.get_method() ~= "POST" then
-                        ngx.status = 400
-                        ngx.say("Unsupported request method: ", ngx.req.get_method())
-                    end
-                    ngx.req.read_body()
-                    local body, err = ngx.req.get_body_data()
-                    body, err = json.decode(body)
-
-                    local test_type = ngx.req.get_headers()["test-type"]
-                    if test_type == "options" then
-                        if body.foo == "bar" then
-                            ngx.status = 200
-                            ngx.say("options works")
-                        else
-                            ngx.status = 500
-                            ngx.say("model options feature doesn't work")
-                        end
-                        return
-                    end
-
-                    local header_auth = ngx.req.get_headers()["authorization"]
-                    local query_auth = ngx.req.get_uri_args()["apikey"]
-
-                    if header_auth ~= "Bearer token" and query_auth ~= "apikey" then
-                        ngx.status = 401
-                        ngx.say("Unauthorized")
-                        return
-                    end
-
-                    if header_auth == "Bearer token" or query_auth == "apikey" then
-                        ngx.req.read_body()
-                        local body, err = ngx.req.get_body_data()
-                        body, err = json.decode(body)
-
-                        if not body.messages or #body.messages < 1 then
-                            ngx.status = 400
-                            ngx.say([[{ "error": "bad request"}]])
-                            return
-                        end
-
-                        if body.messages[1].content == "write an SQL query to get all rows from student table" then
-                            ngx.print("SELECT * FROM STUDENTS")
-                            return
-                        end
-
-                        ngx.status = 200
-                        ngx.say([[$resp]])
-                        return
-                    end
-
-
-                    ngx.status = 503
-                    ngx.say("reached the end of the test suite")
-                }
-            }
-
-            location /v1/embeddings {
-                content_by_lua_block {
-                    if ngx.req.get_method() ~= "POST" then
-                        ngx.status = 400
-                        ngx.say("unsupported request method: ", ngx.req.get_method())
-                    end
-
-                    local header_auth = ngx.req.get_headers()["authorization"]
-                    if header_auth ~= "Bearer token" then
-                        ngx.status = 401
-                        ngx.say("unauthorized")
-                        return
-                    end
-
-                    ngx.req.read_body()
-                    local body, err = ngx.req.get_body_data()
-                    local json = require("cjson.safe")
-                    body, err = json.decode(body)
-                    if err then
-                        ngx.status = 400
-                        ngx.say("failed to get request body: ", err)
-                    end
-
-                    if body.model ~= "text-embedding-ada-002" then
-                        ngx.status = 400
-                        ngx.say("unsupported model: ", body.model)
-                        return
-                    end
-
-                    if body.encoding_format ~= "float" then
-                        ngx.status = 400
-                        ngx.say("unsupported encoding format: ", body.encoding_format)
-                        return
-                    end
-
-                    ngx.status = 200
-                    ngx.say([[
-                        {
-                          "object": "list",
-                          "data": [
-                            {
-                              "object": "embedding",
-                              "embedding": [
-                                0.0023064255,
-                                -0.009327292,
-                                -0.0028842222
-                              ],
-                              "index": 0
-                            }
-                          ],
-                          "model": "text-embedding-ada-002",
-                          "usage": {
-                            "prompt_tokens": 8,
-                            "total_tokens": 8
-                          }
-                        }
-                    ]])
-                }
-            }
-
-            location /random {
-                content_by_lua_block {
-                    ngx.say("path override works")
-                }
-            }
-        }
+    # The plugin no longer logs the payload; reproduce the observability the
+    # tests rely on by logging each batch entry from a test-only hook.
+    my $extra_init_by_lua = <<_EOC_;
+    local bp_manager = require("apisix.utils.batch-processor-manager")
+    local core = require("apisix.core")
+    local function log_send_data(entry)
+        local data = type(entry) == "table" and core.json.encode(entry) or entry
+        core.log.info("send data to kafka: ", data)
+    end
+    local old_add = bp_manager.add_entry
+    bp_manager.add_entry = function(self, conf, entry, max_pending_entries)
+        local ok = old_add(self, conf, entry, max_pending_entries)
+        if ok then
+            log_send_data(entry)
+        end
+        return ok
+    end
+    local old_new = bp_manager.add_entry_to_new_processor
+    bp_manager.add_entry_to_new_processor = function(self, conf, entry, ctx, func, max_pending_entries)
+        local ok = old_new(self, conf, entry, ctx, func, max_pending_entries)
+        if ok then
+            log_send_data(entry)
+        end
+        return ok
+    end
 _EOC_
 
-    $block->set_value("http_config", $http_config);
+    if (!defined $block->extra_init_by_lua) {
+        $block->set_value("extra_init_by_lua", $extra_init_by_lua);
+    }
 });
 
 run_tests();
@@ -204,7 +93,7 @@ __DATA__
                                 "temperature": 1.0
                             },
                             "override": {
-                                "endpoint": "http://localhost:6724"
+                                "endpoint": "http://127.0.0.1:1980"
                             },
                             "ssl_verify": false,
                             "logging": {
@@ -243,6 +132,7 @@ POST /anything
 { "messages": [ { "role": "system", "content": "You are a mathematician" }, { "role": "user", "content": "What is 1+1?"} ] }
 --- more_headers
 Authorization: Bearer token
+X-AI-Fixture: openai/chat-basic.json
 --- error_log
 send data to kafka:
 llm_request
@@ -276,7 +166,7 @@ llm_response_text
                                 "temperature": 1.0
                             },
                             "override": {
-                                "endpoint": "http://localhost:6724"
+                                "endpoint": "http://127.0.0.1:1980"
                             },
                             "ssl_verify": false,
                             "logging": {
@@ -315,6 +205,7 @@ POST /anything
 { "messages": [ { "role": "system", "content": "You are a mathematician" }, { "role": "user", "content": "What is 1+1?"} ] }
 --- more_headers
 Authorization: Bearer token
+X-AI-Fixture: openai/chat-basic.json
 --- error_log
 send data to kafka:
 llm_summary
@@ -348,7 +239,7 @@ llm_response_text
                                 "temperature": 1.0
                             },
                             "override": {
-                                "endpoint": "http://localhost:6724"
+                                "endpoint": "http://127.0.0.1:1980"
                             },
                             "ssl_verify": false,
                             "logging": {
@@ -387,6 +278,7 @@ POST /anything
 { "messages": [ { "role": "system", "content": "You are a mathematician" }, { "role": "user", "content": "What is 1+1?"} ] }
 --- more_headers
 Authorization: Bearer token
+X-AI-Fixture: openai/chat-basic.json
 --- no_error_log
 llm_request
 llm_response_text
