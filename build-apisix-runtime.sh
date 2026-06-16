@@ -21,15 +21,23 @@ ld_opt=${ld_opt:-"-L$zlib_prefix/lib -L$pcre_prefix/lib -L$OPENSSL_PREFIX/lib -W
 
 # dependencies for building openresty
 OPENSSL_VERSION=${OPENSSL_VERSION:-"3.4.1"}
-OPENRESTY_VERSION="1.27.1.2"
-ngx_multi_upstream_module_ver="1.3.2"
+OPENRESTY_VERSION=${OPENRESTY_VERSION:-"1.31.1.1"}
+if [[ ! "$OPENRESTY_VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+    echo "ERROR: invalid OPENRESTY_VERSION: $OPENRESTY_VERSION" >&2
+    exit 1
+fi
+ngx_multi_upstream_module_ver="1.3.3"
 mod_dubbo_ver="1.0.2"
-apisix_nginx_module_ver="1.19.3"
+apisix_nginx_module_ver=${apisix_nginx_module_ver:-"1.19.5"}
+if [[ ! "$apisix_nginx_module_ver" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    echo "ERROR: invalid apisix_nginx_module_ver: $apisix_nginx_module_ver" >&2
+    exit 1
+fi
 wasm_nginx_module_ver="0.7.0"
 lua_var_nginx_module_ver="v0.5.3"
 lua_resty_events_ver="0.2.0"
 #zcd: 
-NGINX_VERSION="1.27.1"
+NGINX_VERSION="1.31.1"
 
 install_openssl_3(){
     local fips=""
@@ -53,7 +61,7 @@ install_openssl_3(){
       --with-zlib-lib=$zlib_prefix/lib \
       --with-zlib-include=$zlib_prefix/include
     make -j $(nproc) LD_LIBRARY_PATH= CC="gcc"
-    sudo make install
+    sudo make install_sw install_ssldirs
     if [ -f "$OPENSSL_CONF_PATH" ]; then
         sudo cp "$OPENSSL_CONF_PATH" "$OPENSSL_PREFIX"/ssl/openssl.cnf
     fi
@@ -63,7 +71,6 @@ install_openssl_3(){
     fi
     cd ..
 }
-
 
 if ([ $# -gt 0 ] && [ "$1" == "latest" ]) || [ "$runtime_version" == "0.0.0" ]; then
     debug_args="--with-debug"
@@ -79,8 +86,8 @@ cd "$workdir" || exit 1
 
 install_openssl_3
 
-wget --no-check-certificate https://openresty.org/download/openresty-${OPENRESTY_VERSION}.tar.gz
-tar -zxvpf openresty-${OPENRESTY_VERSION}.tar.gz > /dev/null
+wget --no-check-certificate "https://openresty.org/download/openresty-${OPENRESTY_VERSION}.tar.gz"
+tar -zxvpf "openresty-${OPENRESTY_VERSION}.tar.gz" > /dev/null
 
 if [ "$repo" == lua-resty-events ]; then
     cp -r "$prev_workdir" ./lua-resty-events-${lua_resty_events_ver}
@@ -107,11 +114,11 @@ else
 fi
 
 if [ "$repo" == apisix-nginx-module ]; then
-    cp -r "$prev_workdir" ./apisix-nginx-module-${apisix_nginx_module_ver}
+    cp -r "$prev_workdir" "./apisix-nginx-module-${apisix_nginx_module_ver}"
 else
-    git clone --depth=1 -b $apisix_nginx_module_ver \
+    git clone --depth=1 -b "$apisix_nginx_module_ver" -- \
         https://github.com/api7/apisix-nginx-module.git \
-        apisix-nginx-module-${apisix_nginx_module_ver}
+        "apisix-nginx-module-${apisix_nginx_module_ver}"
 fi
 
 if [ "$repo" == wasm-nginx-module ]; then
@@ -141,8 +148,13 @@ cd ngx_multi_upstream_module-${ngx_multi_upstream_module_ver} || exit 1
 ./patch.sh ../openresty-${OPENRESTY_VERSION}
 cd ..
 
-cd apisix-nginx-module-${apisix_nginx_module_ver}/patch || exit 1
+cd "apisix-nginx-module-${apisix_nginx_module_ver}/patch" || exit 1
 ./patch.sh ../../openresty-${OPENRESTY_VERSION}
+cd ../..
+
+#zcd: patch http connect module to openresty
+cd "../ngx_http_proxy_connect_module" || exit 1
+patch -d ../../openresty-${OPENRESTY_VERSION}/bundle/nginx-${NGINX_VERSION} -p 1 < patch/proxy_connect_rewrite_102102.patch
 cd ../..
 
 cd wasm-nginx-module-${wasm_nginx_module_ver} || exit 1
@@ -161,11 +173,12 @@ if [ ! -d "bundle/lua-resty-limit-traffic-$or_limit_ver" ]; then
     exit 1
 else
     rm -rf bundle/lua-resty-limit-traffic-$or_limit_ver
-    limit_ver=1.0.0
+    limit_ver=1.2.0
     wget "https://github.com/api7/lua-resty-limit-traffic/archive/refs/tags/v$limit_ver.tar.gz" -O "lua-resty-limit-traffic-$limit_ver.tar.gz"
     tar -xzf lua-resty-limit-traffic-$limit_ver.tar.gz
     mv lua-resty-limit-traffic-$limit_ver bundle/lua-resty-limit-traffic-$or_limit_ver
 fi
+
 
 ./configure --prefix="$OR_PREFIX" \
     --with-cc-opt="-DAPISIX_RUNTIME_VER=$runtime_version $cc_opt" \
@@ -173,9 +186,9 @@ fi
     $debug_args \
     --add-module=../mod_dubbo-${mod_dubbo_ver} \
     --add-module=../ngx_multi_upstream_module-${ngx_multi_upstream_module_ver} \
-    --add-module=../apisix-nginx-module-${apisix_nginx_module_ver} \
-    --add-module=../apisix-nginx-module-${apisix_nginx_module_ver}/src/stream \
-    --add-module=../apisix-nginx-module-${apisix_nginx_module_ver}/src/meta \
+    --add-module="../apisix-nginx-module-${apisix_nginx_module_ver}" \
+    --add-module="../apisix-nginx-module-${apisix_nginx_module_ver}/src/stream" \
+    --add-module="../apisix-nginx-module-${apisix_nginx_module_ver}/src/meta" \
     --add-module=../wasm-nginx-module-${wasm_nginx_module_ver} \
     --add-module=../lua-var-nginx-module-${lua_var_nginx_module_ver} \
     --add-module=../lua-resty-events-${lua_resty_events_ver} \
@@ -211,9 +224,6 @@ fi
     $no_pool_patch \
     -j`nproc`
 
-#zcd: patch http connect module to openresty
-patch -d build/nginx-${NGINX_VERSION}/ -p 1 < ../ngx_http_proxy_connect_module/patch/proxy_connect_rewrite_102101.patch
-
 make -j`nproc`
 sudo make install
 cd ..
@@ -225,7 +235,7 @@ sudo install -d "$OR_PREFIX"/lualib/resty/events/compat/
 sudo install -m 644 lualib/resty/events/compat/*.lua "$OR_PREFIX"/lualib/resty/events/compat/
 cd ..
 
-cd apisix-nginx-module-${apisix_nginx_module_ver} || exit 1
+cd "apisix-nginx-module-${apisix_nginx_module_ver}" || exit 1
 sudo OPENRESTY_PREFIX="$OR_PREFIX" make install
 cd ..
 
