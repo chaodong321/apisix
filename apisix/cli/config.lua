@@ -291,6 +291,7 @@ local _M = {
     "clickhouse-logger",
     "tencent-cloud-cls",
     "inspect",
+    "log-rotate",
     "example-plugin",
     "aws-lambda",
     "azure-functions",
