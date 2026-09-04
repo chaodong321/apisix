@@ -328,6 +328,10 @@ _M.ai_proxy_multi_schema = {
             },
             default = { algorithm = "roundrobin" }
         },
+        custom_model = {
+            type = "string",
+            description = "Custom model name.",
+        },
         instances = ai_instance_schema,
         logging = logging_schema,
         fallback_strategy = {
