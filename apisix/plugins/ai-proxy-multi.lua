@@ -320,8 +320,7 @@ local function pick_target(ctx, conf, ups_tab)
     if not res_conf then
         return nil, nil, "failed to fetch the parent config"
     end
-    local request_table, _ = core.request.get_json_request_body_table()
-    local request_model = request_table and request_table.model
+    local request_model = ctx.request_model
     local allow_instances = {}
     if not request_model then
         core.log.warn("request llm model is empty, allow all instance to pick")
@@ -459,6 +458,22 @@ function _M.access(conf, ctx)
         ups_tab["hash_on"] = hash_on
     end
 
+    local request_table, _ = core.request.get_json_request_body_table()
+    local request_model = request_table and request_table.model
+    local custom_model = core.table.try_read_attr(conf, "custom_model")
+    if custom_model then
+        if not request_model then
+            core.log.error("request model is empty")
+            return 503, "request model is empty"
+        end
+        if custom_model ~= request_model then
+            core.log.error("request model is incorrect, request model: ", request_model, ", custom model: ", custom_model)
+            return 503, "request model is incorrect"
+        end
+        ctx.custom_model = custom_model
+        request_model = nil
+    end
+    ctx.request_model = request_model
     local name, ai_instance, err = pick_ai_instance(ctx, conf, ups_tab)
     if err then
         return 503, err
