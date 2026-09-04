@@ -57,7 +57,7 @@ env GCP_SERVICE_ACCOUNT;
 
 {% if envs then %}
 {% for _, name in ipairs(envs) do %}
-env {*name*};
+env "{*name*}";
 {% end %}
 {% end %}
 
@@ -73,11 +73,12 @@ lua {
     {% end %}
     {% if standalone_with_admin_api then %}
     lua_shared_dict standalone-config {* meta.lua_shared_dict["standalone-config"] *};
+    lua_shared_dict standalone-status {* meta.lua_shared_dict["standalone-status"] *};
     {% end %}
     {% if status then %}
     lua_shared_dict status-report {* meta.lua_shared_dict["status-report"] *};
     {% end %}
-    lua_shared_dict nacos 10m;
+    lua_shared_dict nacos 64m;
     lua_shared_dict upstream-healthcheck {* meta.lua_shared_dict["upstream-healthcheck"] *};
 }
 
@@ -146,10 +147,17 @@ stream {
     lua_max_running_timers {* max_running_timers *};
     {% end %}
 
+    # backs apisix_stream_active_connections and apisix_stream_bandwidth; the
+    # counters live in nginx so that they keep moving during a long-lived
+    # session instead of only being known once it ends
+    {% if use_apisix_base and enabled_stream_plugins["prometheus"] and stream.metrics_zone_size then %}
+    apisix_stream_metrics_zone {* stream.metrics_zone_size *};
+    {% end %}
+
     lua_shared_dict lrucache-lock-stream {* stream.lua_shared_dict["lrucache-lock-stream"] *};
     lua_shared_dict etcd-cluster-health-check-stream {* stream.lua_shared_dict["etcd-cluster-health-check-stream"] *};
     lua_shared_dict worker-events-stream {* stream.lua_shared_dict["worker-events-stream"] *};
-    lua_shared_dict nacos-stream 10m;
+    lua_shared_dict nacos-stream 64m;
 
     {% if enabled_discoveries["tars"] then %}
     lua_shared_dict tars-stream {* stream.lua_shared_dict["tars-stream"] *};
@@ -171,6 +179,12 @@ stream {
 
     {% if ssl.ssl_trusted_certificate ~= nil then %}
     lua_ssl_trusted_certificate {* ssl.ssl_trusted_certificate *};
+    {% end %}
+
+    {% if stream.real_ip_from then %}
+    {% for _, real_ip in ipairs(stream.real_ip_from) do %}
+    set_real_ip_from {*real_ip*};
+    {% end %}
     {% end %}
 
     # for stream logs, off by default
@@ -219,15 +233,16 @@ stream {
         }
     }
 
+    {% for _, server_group in ipairs(stream_proxy.servers or {}) do %}
     server {
-        {% for _, item in ipairs(stream_proxy.tcp or {}) do %}
-        listen {*item.addr*} {% if item.tls then %} ssl {% end %} {% if enable_reuseport then %} reuseport {% end %} {% if proxy_protocol and proxy_protocol.enable_tcp_pp then %} proxy_protocol {% end %};
+        {% for _, item in ipairs(server_group.tcp) do %}
+        listen {*item.addr*} {% if item.tls then %} ssl {% end %} {% if enable_reuseport then %} reuseport {% end %} {% if item.proxy_protocol then %} proxy_protocol {% end %};
         {% end %}
-        {% for _, addr in ipairs(stream_proxy.udp or {}) do %}
+        {% for _, addr in ipairs(server_group.udp) do %}
         listen {*addr*} udp {% if enable_reuseport then %} reuseport {% end %};
         {% end %}
 
-        {% if tcp_enable_ssl then %}
+        {% if server_group.tcp_enable_ssl then %}
         ssl_certificate      {* ssl.ssl_cert *};
         ssl_certificate_key  {* ssl.ssl_cert_key *};
 
@@ -240,7 +255,7 @@ stream {
         }
         {% end %}
 
-        {% if proxy_protocol and proxy_protocol.enable_tcp_pp_to_upstream then %}
+        {% if server_group.proxy_protocol_to_upstream then %}
         proxy_protocol on;
         {% end %}
 
@@ -260,11 +275,34 @@ stream {
             apisix.stream_log_phase()
         }
     }
+    {% end %}
 }
 {% end %}
 
 {% if enable_http then %}
 http {
+    # X-Forwarded-* sanitization, first half. The second is
+    # `handle_trusted_x_forwarded_headers` in apisix/init.lua.
+    #
+    # Every request is neutralized unconditionally, in the rewrite phase, in C.
+    # That is the case worth optimizing for: with no `apisix.trusted_addresses`
+    # configured no peer is trusted, so it is what every request gets.
+    #
+    # These keep the names the `set` directives they replace used, and hold the
+    # same thing: what X-Forwarded-Host and X-Forwarded-Port are given below.
+    #
+    # the port carried by the Host header, falling back to the listener's own
+    map $http_host $var_x_forwarded_port {
+        default         $server_port;
+        "~:(?<p>\\d+)$" $p;
+    }
+    # `$http_host` rather than `$host`: the port the client connected to belongs
+    # in X-Forwarded-Host, and `$host` drops it
+    map $http_host $var_x_forwarded_host {
+        default $http_host;
+        ""      $host;
+    }
+
     # put extra_lua_path in front of the builtin path
     # so user can override the source code
     lua_package_path  "{*extra_lua_path*}$prefix/deps/share/lua/5.1/?.lua;$prefix/deps/share/lua/5.1/?/init.lua;]=]
@@ -327,6 +365,11 @@ http {
     lua_shared_dict plugin-limit-count-lock {* http.lua_shared_dict["plugin-limit-count-lock"] *};
     lua_shared_dict plugin-limit-count-redis-cluster-slot-lock {* http.lua_shared_dict["plugin-limit-count-redis-cluster-slot-lock"] *};
     lua_shared_dict plugin-limit-count-reset-header {* http.lua_shared_dict["plugin-limit-count"] *};
+    {% end %}
+
+    {% if enabled_plugins["limit-conn"] or enabled_plugins["limit-req"] or enabled_plugins["limit-count"] then %}
+    # tracks unhealthy redis cluster nodes for fast-fail
+    lua_shared_dict redis_cluster_health 10m;
     {% end %}
 
     {% if enabled_plugins["graphql-limit-count"] then %}
@@ -808,6 +851,7 @@ http {
 
             set $upstream_scheme             'http';
             set $upstream_host               $http_host;
+            set $upstream_unresolved_host    '';
             set $upstream_uri                '';
             set $request_line                '';
             set $ctx_ref                     '';
@@ -866,14 +910,43 @@ http {
 
             ### the following x-forwarded-* headers is to send to upstream server
 
-            set $var_x_forwarded_proto      $scheme;
-            set $var_x_forwarded_host       $host;
-            set $var_x_forwarded_port       $server_port;
+            # Take copies before neutralizing, so a trusted peer's own values can
+            # be put back. ngx_rewrite's `set` runs before headers_more's handler,
+            # which is what makes this ordering work -- do not reorder these.
+            #
+            # Reading `$http_x_forwarded_*` here indexes them, so they keep the
+            # client's raw value for the rest of the request. Nothing downstream
+            # derives from them -- the upstream headers come from `r->headers_in`
+            # and Lua's `ctx.var.http_x_forwarded_*` re-reads it through the prefix
+            # handler -- but an access log format that names them logs what the
+            # client sent. `$scheme` / `$var_x_forwarded_host` /
+            # `$var_x_forwarded_port` are the sanitized values.
+            set $original_x_forwarded_proto $http_x_forwarded_proto;
+            set $original_x_forwarded_host   $http_x_forwarded_host;
+            set $original_x_forwarded_port   $http_x_forwarded_port;
+            # X-Forwarded-For is the one that cannot be copied here. Unlike
+            # `$http_x_forwarded_proto` and friends, which are prefix variables and
+            # are re-evaluated on every read, `$http_x_forwarded_for` is a dedicated
+            # entry in `ngx_http_core_variables[]`; naming it in the configuration
+            # makes it indexed, and this `set` would then pin the client's value in
+            # `r->variables[]` for the whole request -- surviving the clear below and
+            # feeding it back to route `vars`, rate-limit keys and every other
+            # `ctx.var` reader. Lua fills the slot instead, in the one branch that
+            # destroys the value.
+            set $original_x_forwarded_for    '';
+            set $original_forwarded          $http_forwarded;
+            more_set_input_headers "X-Forwarded-Proto: $scheme";
+            more_set_input_headers "X-Forwarded-Host: $var_x_forwarded_host";
+            more_set_input_headers "X-Forwarded-Port: $var_x_forwarded_port";
+            more_set_input_headers "Forwarded: ";
 
+            # X-Forwarded-Proto/Host/Port are not set here: `r->headers_in` already
+            # holds the values this request should carry, and proxy_pass forwards it
+            # as it stands. That is also what lets a plugin rewrite them -- a
+            # `proxy_set_header` would overwrite the plugin's value with whatever the
+            # variable held. X-Forwarded-For is different: the connection address has
+            # to be appended, which only $proxy_add_x_forwarded_for does.
             proxy_set_header   X-Forwarded-For      $proxy_add_x_forwarded_for;
-            proxy_set_header   X-Forwarded-Proto    $var_x_forwarded_proto;
-            proxy_set_header   X-Forwarded-Host     $var_x_forwarded_host;
-            proxy_set_header   X-Forwarded-Port     $var_x_forwarded_port;
 
             {% if enabled_plugins["proxy-cache"] or enabled_plugins["graphql-proxy-cache"] then %}
             ###  the following configuration is to cache response content from upstream server
@@ -930,6 +1003,9 @@ http {
             grpc_set_header   Content-Type application/grpc;
             grpc_set_header   TE trailers;
             grpc_socket_keepalive on;
+            # only consulted once upstream.tls.verify turns verification on;
+            # without it the certificate would be checked against "apisix_backend"
+            grpc_ssl_name     $upstream_host;
             grpc_pass         $upstream_scheme://apisix_backend;
 
             {% if enabled_plugins["proxy-mirror"] then %}
@@ -986,10 +1062,13 @@ http {
             proxy_set_header   X-Real-IP         $remote_addr;
             proxy_pass_header  Date;
 
+            # X-Forwarded-Proto/Host/Port are not set here: `r->headers_in` already
+            # holds the values this request should carry, and proxy_pass forwards it
+            # as it stands. That is also what lets a plugin rewrite them -- a
+            # `proxy_set_header` would overwrite the plugin's value with whatever the
+            # variable held. X-Forwarded-For is different: the connection address has
+            # to be appended, which only $proxy_add_x_forwarded_for does.
             proxy_set_header   X-Forwarded-For      $proxy_add_x_forwarded_for;
-            proxy_set_header   X-Forwarded-Proto    $var_x_forwarded_proto;
-            proxy_set_header   X-Forwarded-Host     $var_x_forwarded_host;
-            proxy_set_header   X-Forwarded-Port     $var_x_forwarded_port;
 
             proxy_pass      $upstream_scheme://apisix_backend$upstream_uri;
 

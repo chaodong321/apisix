@@ -33,18 +33,41 @@ local ngx_now = ngx.now
 
 local require = require
 local pcall = pcall
+local error = error
+local tostring = tostring
 local ipairs = ipairs
 local type = type
 local string = string
+local sub = string.sub
+local str_format = string.format
 local url = require("socket.url")
 
 local priority_balancer = require("apisix.balancer.priority")
+local semantic = require("apisix.plugins.ai-proxy.semantic")
+local embedding = require("apisix.plugins.ai-proxy.embedding")
+local ai_protocols = require("apisix.plugins.ai-protocols")
 local endpoint_regex = "^(https?)://([^:/]+):?(%d*)/?.*$"
 
 local pickers = {}
 local lrucache_server_picker = core.lrucache.new({
     ttl = 300, count = 256
 })
+local lrucache_health_status = core.lrucache.new({
+    ttl = 300, count = 256
+})
+-- Keyed by route + conf version, so config changes invalidate immediately;
+-- the long ttl just avoids re-embedding references on unchanged config.
+local lrucache_semantic_vectors = core.lrucache.new({
+    ttl = 3600, count = 256
+})
+-- The prompt is sent verbatim to a third-party embedding endpoint. Bound it: a
+-- request body may be up to max_req_body_size (64MB by default), and an oversized
+-- input would blow the embedding model's token limit, 400, and silently push every
+-- large prompt to the fallback. OpenAI-compatible embedding models (which LiteLLM
+-- and others target) cap input at ~8192 tokens; we bound by bytes since counting
+-- tokens needs a tokenizer, using ~2 bytes/token so the cap stays under the token
+-- limit even for multi-byte scripts while keeping the whole routing prompt.
+local MAX_EMBED_PROMPT_BYTES = 16384
 
 local plugin_name = "ai-proxy-multi"
 local _M = {
@@ -102,7 +125,21 @@ function _M.check_schema(conf)
         return false, err
     end
 
-    for _, instance in ipairs(conf.instances) do
+    -- `instance.name` is the only identifier the runtime has: it keys the
+    -- balancer nodes, the health checker and the health status, none of which
+    -- include the priority. Two instances sharing a name therefore collapse
+    -- into a single logical node with a single checker, so one instance's
+    -- health decides the other's fate while requests keep using the first
+    -- instance's auth. Reject duplicates instead of routing on an ambiguity.
+    local seen_names = core.table.new(0, #conf.instances)
+    for i, instance in ipairs(conf.instances) do
+        if seen_names[instance.name] then
+            return false, str_format("duplicate instance name '%s' at " ..
+                                     "instances[%d] and instances[%d]",
+                                     instance.name, seen_names[instance.name], i)
+        end
+        seen_names[instance.name] = i
+
         local endpoint = instance and instance.override and instance.override.endpoint
         if endpoint then
             local scheme, host, _ = endpoint:match(endpoint_regex)
@@ -153,7 +190,72 @@ function _M.check_schema(conf)
         end
     end
 
-    return ok
+    if algo == "semantic" then
+        local semantic_opts = conf.semantic_opts
+        if not semantic_opts or not semantic_opts.embeddings then
+            return false, "must configure `semantic_opts.embeddings` when balancer " ..
+                "algorithm is semantic"
+        end
+        local embeddings = semantic_opts.embeddings
+        -- Same scheme+host check the instance endpoints get: without it an
+        -- endpoint like "host/path" parses to a nil host and every request would
+        -- silently fail open, i.e. the route would never work with no signal.
+        local eendpoint = embeddings.endpoint
+        if eendpoint then
+            local scheme, host = eendpoint:match(endpoint_regex)
+            if not scheme or not host then
+                return false, "invalid `semantic_opts.embeddings.endpoint`"
+            end
+        end
+        if embeddings.provider == "azure-openai" then
+            -- Azure carries the deployment in the URL and declares no default host
+            -- or path, so the endpoint must be the full embeddings URL. Without a
+            -- path every request would silently fail open to the fallback.
+            if not eendpoint then
+                return false, "must configure `semantic_opts.embeddings.endpoint` " ..
+                    "when embeddings provider is azure-openai"
+            end
+            local parsed = url.parse(eendpoint)
+            local epath = parsed and parsed.path
+            if not epath or epath == "" or epath == "/" then
+                return false, "`semantic_opts.embeddings.endpoint` for azure-openai " ..
+                    "must include the full deployment path, e.g. " ..
+                    "https://{resource}.openai.azure.com" ..
+                    "/openai/deployments/{deployment}/embeddings?api-version=..."
+            end
+        end
+        -- Every instance must declare non-empty `examples`. The `fallback`
+        -- instance is a normal ranked instance too -- it competes on similarity
+        -- like the rest and only additionally serves as the target when nothing
+        -- clears its threshold -- so it is not exempt. A named fallback must point
+        -- at an instance that actually exists.
+        local fallback = semantic_opts.fallback
+        local fallback_found = false
+        for _, instance in ipairs(conf.instances) do
+            if fallback and instance.name == fallback then
+                fallback_found = true
+            end
+            local has_example = false
+            if instance.examples then
+                for _, ex in ipairs(instance.examples) do
+                    if type(ex) == "string" and ex ~= "" then
+                        has_example = true
+                        break
+                    end
+                end
+            end
+            if not has_example then
+                return false, "instance '" .. (instance.name or "?") ..
+                    "': must configure non-empty `examples` for the semantic algorithm"
+            end
+        end
+        if fallback and not fallback_found then
+            return false, "`semantic_opts.fallback` names unknown instance '" ..
+                fallback .. "'"
+        end
+    end
+
+    return true
 end
 
 
@@ -346,16 +448,32 @@ local function get_checkers_status_ver(conf, checkers)
 end
 
 
-
-local function fetch_health_instances(allow_instances, checkers)
-    local instances = allow_instances
+local function fetch_all_instances(conf)
+    local instances = conf.instances
     local new_instances = core.table.new(0, #instances)
-    if not checkers then
-        for _, ins in ipairs(instances) do
-            transform_instances(new_instances, ins)
-        end
-        return new_instances
+    for _, ins in ipairs(instances) do
+        transform_instances(new_instances, ins)
     end
+
+    return new_instances
+end
+
+
+local function fetch_allow_instances(allow_instances)
+    local new_instances = core.table.new(0, #allow_instances)
+    for _, ins in ipairs(allow_instances) do
+        transform_instances(new_instances, ins)
+    end
+
+    return new_instances
+end
+
+
+local function create_health_status(conf, checkers)
+    local instances = conf.instances
+    local health_status = core.table.new(0, #instances)
+    local healthy_dns_nodes = core.table.new(0, #instances)
+    local has_healthy_instance = false
 
     for _, ins in ipairs(instances) do
         local checker = checkers[ins.name]
@@ -363,10 +481,10 @@ local function fetch_health_instances(allow_instances, checkers)
             local host = ins.checks and ins.checks.active and ins.checks.active.host
             local port = ins.checks and ins.checks.active and ins.checks.active.port
             local healthy_nodes = {}
-            ins._healthy_dns_nodes = nil
 
             for _, node in ipairs(ins._dns_nodes or {}) do
-                local ok, err = checker:get_target_status(node.host, port or node.port, host)
+                local ok, err = healthcheck_manager.fetch_node_status(checker,
+                                                     node.host, port or node.port, host)
                 if ok then
                     healthy_nodes[#healthy_nodes + 1] = node
                 elseif err then
@@ -376,23 +494,91 @@ local function fetch_health_instances(allow_instances, checkers)
             end
 
             if #healthy_nodes > 0 then
-                ins._healthy_dns_nodes = healthy_nodes
-                transform_instances(new_instances, ins)
+                healthy_dns_nodes[ins.name] = healthy_nodes
+                health_status[ins.name] = true
+                has_healthy_instance = true
+            else
+                health_status[ins.name] = false
             end
         else
-            ins._healthy_dns_nodes = nil
-            transform_instances(new_instances, ins)
+            health_status[ins.name] = true
+            has_healthy_instance = true
         end
     end
 
-    if core.table.nkeys(new_instances) == 0 then
+    if not has_healthy_instance then
         core.log.warn("all upstream nodes is unhealthy, use default")
-        for _, ins in ipairs(instances) do
+        return {all_unhealthy = true}
+    end
+
+    return {
+        status = health_status,
+        healthy_dns_nodes = healthy_dns_nodes,
+    }
+end
+
+
+local function apply_health_status(conf, health_status)
+    if not health_status or health_status.all_unhealthy then
+        for _, ins in ipairs(conf.instances) do
+            ins._healthy_dns_nodes = nil
+        end
+
+        return nil
+    end
+
+    for _, ins in ipairs(conf.instances) do
+        ins._healthy_dns_nodes = health_status.healthy_dns_nodes[ins.name]
+    end
+
+    return health_status.status
+end
+
+
+-- Build the picker instance set from the healthy subset, reusing
+-- create_health_status/apply_health_status so the per-instance health lookup
+-- lives in exactly one place.
+local function fetch_health_instances(conf, checkers)
+    if not checkers then
+        return fetch_all_instances(conf)
+    end
+
+    local status = apply_health_status(conf, create_health_status(conf, checkers))
+    if not status then
+        return fetch_all_instances(conf)
+    end
+
+    local new_instances = core.table.new(0, #conf.instances)
+    for _, ins in ipairs(conf.instances) do
+        if status[ins.name] then
             transform_instances(new_instances, ins)
         end
     end
 
     return new_instances
+end
+
+
+local function get_health_status_ver(conf, checkers)
+    local parts = core.table.new(#conf.instances, 0)
+    for i, ins in ipairs(conf.instances) do
+        local checker = checkers[ins.name]
+        parts[i] = (ins._nodes_ver or 0) .. ":" .. (checker and checker.status_ver or "x")
+    end
+
+    return table_concat(parts, "-")
+end
+
+
+local function fetch_health_status(conf, checkers, key, version)
+    if not checkers then
+        return nil
+    end
+
+    local health_status = lrucache_health_status(key, version .. "#" ..
+                                                 get_health_status_ver(conf, checkers),
+                                                 create_health_status, conf, checkers)
+    return apply_health_status(conf, health_status)
 end
 
 
@@ -403,7 +589,12 @@ local function create_server_picker(conf, allow_instances, ups_tab, checkers)
         picker = pickers[conf.balancer.algorithm]
     end
 
-    local new_instances = fetch_health_instances(allow_instances, checkers)
+    local new_instances
+    if conf.balancer.algorithm == "chash" then
+        new_instances = fetch_allow_instances(allow_instances)
+    else
+        new_instances = fetch_health_instances(allow_instances, checkers)
+    end
     core.log.info("fetch health instances: ", core.json.delay_encode(new_instances))
 
     if #new_instances._priority_index > 1 then
@@ -413,6 +604,16 @@ local function create_server_picker(conf, allow_instances, ups_tab, checkers)
     core.log.info("upstream nodes: ",
                 core.json.delay_encode(new_instances[new_instances._priority_index[1]]))
     return picker.new(new_instances[new_instances._priority_index[1]], ups_tab)
+end
+
+
+-- Identity of the health checker of the i-th instance: the parent resource key
+-- plus the JSON path of the instance. The health check manager parses it back
+-- to reach construct_upstream(), so both ends must agree on this exact layout.
+local function instance_resource_path(resource_key, index)
+    -- json path is 0 indexed so we need to decrement the index
+    return resource_key .. "#plugins['" .. plugin_name .. "'].instances["
+           .. index - 1 .. "]"
 end
 
 
@@ -432,7 +633,8 @@ local function pick_target(ctx, conf, ups_tab)
     if not res_conf then
         return nil, nil, "failed to fetch the parent config"
     end
-    local request_model = ctx.request_model
+    local request_table, _ = core.request.get_json_request_body_table()
+    local request_model = request_table and request_table.model
     local allow_instances = {}
     if not request_model then
         core.log.warn("request llm model is empty, allow all instance to pick")
@@ -453,9 +655,8 @@ local function pick_target(ctx, conf, ups_tab)
     for i, instance in ipairs(conf.instances) do
         if instance.checks then
             resolve_endpoint(instance)
-            -- json path is 0 indexed so we need to decrement i
-            local resource_path = conf._meta.parent.resource_key ..
-                                  "#plugins['ai-proxy-multi'].instances[" .. i-1 .. "]"
+            local resource_path = instance_resource_path(
+                                      conf._meta.parent.resource_key, i)
             local resource_version = conf._meta.parent.resource_version
             if instance._nodes_ver then
                 resource_version = resource_version .. instance._nodes_ver
@@ -467,8 +668,13 @@ local function pick_target(ctx, conf, ups_tab)
         end
     end
 
-    local version = plugin.conf_version(conf) .. "#" ..
-                    get_checkers_status_ver(conf, checkers)
+    local health_status
+    local version = plugin.conf_version(conf)
+    if conf.balancer.algorithm == "chash" then
+        health_status = fetch_health_status(conf, checkers, ctx.matched_route.key, version)
+    else
+        version = version .. "#" .. get_checkers_status_ver(conf, checkers)
+    end
 
     local server_picker = ctx.server_picker
     if not server_picker then
@@ -486,28 +692,47 @@ local function pick_target(ctx, conf, ups_tab)
     end
     ctx.server_picker = server_picker
 
-    local instance_name, err = server_picker.get(ctx)
-    if err then
-        return nil, nil, err
+    local ai_rate_limiting
+    local check_rate_limiting = conf.fallback_strategy == "instance_health_and_rate_limiting" or
+                                fallback_strategy_has(conf.fallback_strategy, "rate_limiting")
+    if check_rate_limiting then
+        ai_rate_limiting = require("apisix.plugins.ai-rate-limiting")
     end
-    ctx.balancer_server = instance_name
-    if conf.fallback_strategy == "instance_health_and_rate_limiting" or -- for backwards compatible
-       fallback_strategy_has(conf.fallback_strategy, "rate_limiting") then
-        local ai_rate_limiting = require("apisix.plugins.ai-rate-limiting")
-        for _ = 1, #conf.instances do
-            if ai_rate_limiting.check_instance_status(nil, ctx, instance_name) then
+
+    local instance_name, err
+    for _ = 1, #conf.instances do
+        instance_name, err = server_picker.get(ctx)
+        if err then
+            return nil, nil, err
+        end
+
+        if not health_status or health_status[instance_name] then
+            if not check_rate_limiting or
+               ai_rate_limiting.check_instance_status(nil, ctx, instance_name) then
                 break
             end
             core.log.warn("ai instance: ", instance_name,
                              " is not available, try to pick another one")
-            server_picker.after_balance(ctx, true)
-            instance_name, err = server_picker.get(ctx)
-            if err then
-                return nil, nil, err
-            end
-            ctx.balancer_server = instance_name
+
+        else
+            core.log.warn("ai instance: ", instance_name,
+                             " is unhealthy, try to pick another one")
         end
+
+        ctx.balancer_server = instance_name
+        if not server_picker.after_balance then
+            return nil, nil, "failed to skip AI instance: after_balance is unavailable"
+        end
+
+        server_picker.after_balance(ctx, true)
+        instance_name = nil
     end
+
+    if not instance_name then
+        return nil, nil, "all servers tried"
+    end
+
+    ctx.balancer_server = instance_name
 
     local instance_conf = get_instance_conf(conf.instances, instance_name)
     local nodes = instance_conf._healthy_dns_nodes or instance_conf._dns_nodes
@@ -519,9 +744,196 @@ local function pick_target(ctx, conf, ups_tab)
 end
 
 
+local function extract_last_user_message(ctx)
+    local body = core.request.get_json_request_body_table()
+    if not body then
+        return nil
+    end
+    -- Normalize through the protocol adapter instead of reading body.messages
+    -- directly, so the prompt is found for every supported client protocol:
+    -- OpenAI Responses carries it in body.input, Anthropic/Bedrock in structured
+    -- content blocks. get_messages returns canonical {role, content} entries.
+    local messages = ai_protocols.get_messages(body, ctx)
+    for i = #messages, 1, -1 do
+        local m = messages[i]
+        if type(m) == "table" and m.role == "user" then
+            local content = m.content
+            if type(content) == "string" then
+                if content ~= "" then
+                    return content
+                end
+            elseif type(content) == "table" then
+                -- Some adapters return multimodal content unflattened
+                -- ({type=text|image_url,...}); concatenate the text parts so
+                -- routing still works.
+                local parts = {}
+                for _, p in ipairs(content) do
+                    if type(p) == "table" and p.type == "text"
+                       and type(p.text) == "string" then
+                        parts[#parts + 1] = p.text
+                    end
+                end
+                if #parts > 0 then
+                    return table_concat(parts, " ")
+                end
+            end
+        end
+    end
+    return nil
+end
+
+
+-- Embed every instance's examples in one batch and group the normalized
+-- reference vectors by instance name. Raises on embedding failure so the
+-- lrucache below does not cache a bad result.
+local function build_instance_vectors(conf)
+    local texts = {}
+    local owners = {}
+    for _, inst in ipairs(conf.instances) do
+        if inst.examples then
+            for _, ex in ipairs(inst.examples) do
+                texts[#texts + 1] = ex
+                owners[#texts] = inst.name
+            end
+        end
+    end
+
+    local vecs, err = embedding.fetch(conf.semantic_opts.embeddings, texts)
+    if not vecs then
+        error("failed to fetch reference embeddings: " .. tostring(err))
+    end
+
+    local by_instance = {}
+    for i, v in ipairs(vecs) do
+        local name = owners[i]
+        if name then
+            by_instance[name] = by_instance[name] or {}
+            core.table.insert(by_instance[name], semantic.normalize(v))
+        end
+    end
+    return by_instance
+end
+
+
+-- Guaranteed fallback: the instance named by semantic_opts.fallback if
+-- configured, else the first instance. Never fails, so a request always has a
+-- target.
+local function semantic_fallback(conf)
+    local fallback = conf.semantic_opts and conf.semantic_opts.fallback
+    if fallback then
+        for _, inst in ipairs(conf.instances) do
+            if inst.name == fallback then
+                return inst.name, inst
+            end
+        end
+    end
+    local inst = conf.instances[1]
+    return inst.name, inst
+end
+
+
+local function pick_semantic_instance(ctx, conf)
+    local version = plugin.conf_version(conf)
+    local ok, by_instance = pcall(lrucache_semantic_vectors,
+                                  ctx.matched_route.key .. "#semantic", version,
+                                  build_instance_vectors, conf)
+    if not ok or not by_instance then
+        core.log.warn("semantic routing: ", by_instance, ", falling back")
+        return semantic_fallback(conf)
+    end
+
+    local prompt = extract_last_user_message(ctx)
+    if not prompt then
+        core.log.warn("semantic routing: no user message found, falling back")
+        return semantic_fallback(conf)
+    end
+
+    if #prompt > MAX_EMBED_PROMPT_BYTES then
+        prompt = sub(prompt, 1, MAX_EMBED_PROMPT_BYTES)
+    end
+
+    -- pcall, like the reference path above: the embedding response is
+    -- provider-controlled, so a raise here must fall back rather than 500.
+    local fetched, qvecs, err = pcall(embedding.fetch, conf.semantic_opts.embeddings,
+                                      { prompt })
+    if not fetched then
+        core.log.warn("semantic routing: query embedding error: ", qvecs, ", falling back")
+        return semantic_fallback(conf)
+    end
+    if not qvecs or not qvecs[1] then
+        core.log.warn("semantic routing: query embedding failed: ", err, ", falling back")
+        return semantic_fallback(conf)
+    end
+    local qvec = semantic.normalize(qvecs[1])
+    local qdim = #qvec
+
+    local ranked = {}
+    for _, inst in ipairs(conf.instances) do
+        local refs = by_instance[inst.name]
+        if refs then
+            local scores = {}
+            for _, rv in ipairs(refs) do
+                -- guard against dimension drift (e.g. embedding model changed):
+                -- mismatched vectors would make dot() error, so fail open instead.
+                if #rv ~= qdim then
+                    core.log.warn("semantic routing: embedding dimension mismatch ",
+                                  "(query ", qdim, " vs reference ", #rv, "), falling back")
+                    return semantic_fallback(conf)
+                end
+                scores[#scores + 1] = semantic.dot(qvec, rv)
+            end
+            core.table.insert(ranked, {
+                name = inst.name,
+                score = semantic.max(scores),
+            })
+        end
+    end
+    core.table.sort(ranked, function(a, b) return a.score > b.score end)
+
+    local debugging = conf.semantic_opts.debugging
+    if debugging then
+        local parts = {}
+        for _, c in ipairs(ranked) do
+            parts[#parts + 1] = c.name .. ":" .. string.format("%.4f", c.score)
+        end
+        core.response.set_header("X-AI-Semantic-Scores", table_concat(parts, ","))
+    end
+
+    -- Highest score first; pick the first instance that clears its own threshold
+    -- (per-instance override, else the global semantic_opts.threshold).
+    for _, cand in ipairs(ranked) do
+        local inst = get_instance_conf(conf.instances, cand.name)
+        local thr = inst.threshold or conf.semantic_opts.threshold or 0
+        if cand.score >= thr then
+            if debugging then
+                core.response.set_header("X-AI-Semantic-Picked-Instance", cand.name)
+            end
+            core.log.info("semantic routing picked instance: ", cand.name,
+                          ", score: ", cand.score)
+            return cand.name, inst
+        end
+    end
+
+    if debugging then
+        core.response.set_header("X-AI-Semantic-Picked-Instance", "fallback")
+    end
+    -- Only on the fallback path: surface why nothing matched, without requiring
+    -- debugging. Cheap, because this runs once per unmatched request.
+    local unmatched = {}
+    for _, c in ipairs(ranked) do
+        unmatched[#unmatched + 1] = c.name .. ":" .. string.format("%.4f", c.score)
+    end
+    core.log.warn("semantic routing: no instance cleared threshold (scores: ",
+                  table_concat(unmatched, ","), "), falling back")
+    return semantic_fallback(conf)
+end
+
+
 local function pick_ai_instance(ctx, conf, ups_tab)
     local instance_name, instance_conf, err
-    if #conf.instances == 1 then
+    if conf.balancer and conf.balancer.algorithm == "semantic" then
+        instance_name, instance_conf = pick_semantic_instance(ctx, conf)
+    elseif #conf.instances == 1 then
         instance_name = conf.instances[1].name
         instance_conf = conf.instances[1]
     else
@@ -577,23 +989,6 @@ function _M.access(conf, ctx)
         ups_tab["hash_on"] = hash_on
     end
 
-    
-    local request_table, _ = core.request.get_json_request_body_table()
-    local request_model = request_table and request_table.model
-    local custom_model = core.table.try_read_attr(conf, "custom_model")
-    if custom_model then
-        if not request_model then
-            core.log.error("request model is empty")
-            return 503, "request model is empty"
-        end
-        if custom_model ~= request_model then
-            core.log.error("request model is incorrect, request model: ", request_model, ", custom model: ", custom_model)
-            return 503, "request model is incorrect"
-        end
-        ctx.custom_model = custom_model
-        request_model = nil
-    end
-    ctx.request_model = request_model
     local name, ai_instance, perr = pick_ai_instance(ctx, conf, ups_tab)
     if perr then
         return 503, perr
@@ -613,14 +1008,15 @@ function _M.access(conf, ctx)
 end
 
 
-local function retry_on_error(ctx, conf, code)
+local function retry_on_error(ctx, conf, code, body)
     if not ctx.server_picker then
         return code
     end
     ctx.server_picker.after_balance(ctx, true)
     if (code == 429 and fallback_strategy_has(conf.fallback_strategy, "http_429")) or
        (code >= 500 and code < 600 and
-       fallback_strategy_has(conf.fallback_strategy, "http_5xx")) then
+       fallback_strategy_has(conf.fallback_strategy, "http_5xx")) or
+       base.is_fallback_http_status(conf, code) then
         -- Slow-failure guard: only retry when the failed attempt finished within
         -- retry_on_failure_within_ms. A slow failure (e.g. a 5xx returned after
         -- minutes) is given back to the client directly, so fallback never doubles
@@ -648,6 +1044,7 @@ local function retry_on_error(ctx, conf, code)
             end
         end
 
+        local failed_instance = ctx.picked_ai_instance_name
         local name, ai_instance, err = pick_ai_instance(ctx, conf)
         if err then
             core.log.error("failed to pick new AI instance: ", err)
@@ -660,6 +1057,11 @@ local function retry_on_error(ctx, conf, code)
             return 401
         end
 
+        -- The failed attempt's body never reaches the client (a later attempt
+        -- responds instead), so surface the upstream error here for diagnostics.
+        core.log.warn("ai instance ", failed_instance, " returned status ", code,
+                      ", falling back to ", name, ". upstream error body: ",
+                      body or "")
         ctx.balancer_ip = name
         ctx.picked_ai_instance_name = name
         ctx.picked_ai_instance = ai_instance
@@ -667,6 +1069,28 @@ local function retry_on_error(ctx, conf, code)
     end
     return code
 end
+
+-- Each instance can run its own active health check, whose checker is keyed by
+-- instance_resource_path(). Nothing outside the plugin can guess that layout, so
+-- expose it for the control API, which reports the health status of every
+-- configured checker (control/v1.lua). `meta` describes the checker to whoever
+-- reports it -- what an instance is is the plugin's business, so the control API
+-- passes it through instead of knowing about it.
+function _M.list_healthcheck_targets(conf, resource_key)
+    local targets = {}
+    for i, instance in ipairs(conf.instances or {}) do
+        if instance.checks then
+            core.table.insert(targets, {
+                resource_path = instance_resource_path(resource_key, i),
+                checks = instance.checks,
+                meta = {instance = instance.name},
+            })
+        end
+    end
+
+    return targets
+end
+
 
 function _M.construct_upstream(instance)
     if not instance then
@@ -730,8 +1154,8 @@ end
 
 
 function _M.before_proxy(conf, ctx)
-     return base.before_proxy(conf, ctx, function (ctx, conf, code)
-        return retry_on_error(ctx, conf, code)
+     return base.before_proxy(conf, ctx, function (ctx, conf, code, body)
+        return retry_on_error(ctx, conf, code, body)
     end)
 end
 

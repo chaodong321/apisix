@@ -207,6 +207,7 @@ $grpc_location .= <<_EOC_;
             grpc_set_header   Content-Type application/grpc;
             grpc_set_header   TE trailers;
             grpc_socket_keepalive on;
+            grpc_ssl_name     \$upstream_host;
             grpc_pass         \$upstream_scheme://apisix_backend;
             mirror              /proxy_mirror_grpc;
 
@@ -238,9 +239,6 @@ my $disable_proxy_buffering_location = <<_EOC_;
             proxy_pass_header  Date;
 
             proxy_set_header   X-Forwarded-For      \$proxy_add_x_forwarded_for;
-            proxy_set_header   X-Forwarded-Proto    \$var_x_forwarded_proto;
-            proxy_set_header   X-Forwarded-Host     \$var_x_forwarded_host;
-            proxy_set_header   X-Forwarded-Port     \$var_x_forwarded_port;
 
             proxy_pass         \$upstream_scheme://apisix_backend\$upstream_uri;
             mirror             /proxy_mirror;
@@ -330,6 +328,7 @@ lua {
     lua_shared_dict prometheus-metrics 15m;
     lua_shared_dict prometheus-cache 10m;
     lua_shared_dict standalone-config 10m;
+    lua_shared_dict standalone-status 1m;
     lua_shared_dict status-report 1m;
     lua_shared_dict nacos 10m;
     lua_shared_dict consul 10m;
@@ -448,9 +447,15 @@ _EOC_
             ngx.say("hello world")
 _EOC_
 
+    # backs apisix_stream_active_connections and apisix_stream_bandwidth
+    my $stream_metrics_zone = $version =~ m/\/apisix-nginx-module/
+                              ? "apisix_stream_metrics_zone 1m;" : "";
+
     my $stream_config = $block->stream_config // <<_EOC_;
     $lua_deps_path
     lua_socket_log_errors off;
+
+    $stream_metrics_zone
 
     lua_shared_dict lrucache-lock-stream 10m;
     lua_shared_dict plugin-limit-conn-stream 10m;
@@ -626,6 +631,16 @@ _EOC_
     $http_config .= <<_EOC_;
     $lua_deps_path
 
+    # mirrors apisix/cli/ngx_tpl.lua
+    map \$http_host \$var_x_forwarded_port {
+        default          \$server_port;
+        "~:(?<p>\\\\d+)\$" \$p;
+    }
+    map \$http_host \$var_x_forwarded_host {
+        default \$http_host;
+        ""      \$host;
+    }
+
     lua_shared_dict plugin-limit-req 10m;
     lua_shared_dict plugin-limit-count 10m;
     lua_shared_dict plugin-limit-count-lock 10m;
@@ -718,7 +733,7 @@ _EOC_
         require("apisix").http_exit_worker()
     }
 
-    log_format main escape=default '\$remote_addr - \$remote_user [\$time_local] \$http_host "\$request_line" \$status \$body_bytes_sent \$request_time "\$http_referer" "\$http_user_agent" \$upstream_addr \$upstream_status \$apisix_upstream_response_time "\$upstream_scheme://\$upstream_host\$upstream_uri" \$request_llm_model \$llm_model \$llm_time_to_first_token \$llm_prompt_tokens \$llm_completion_tokens \$llm_total_tokens \$llm_stream \$llm_has_tool_calls \$llm_tool_count \$llm_end_user_id \$llm_cache_read_input_tokens \$llm_cache_creation_input_tokens \$llm_reasoning_tokens "\$rate_limiting_info"';
+    log_format main escape=default '\$remote_addr - \$remote_user [\$time_local] \$http_host "\$request_line" \$status \$body_bytes_sent \$request_time "\$http_referer" "\$http_user_agent" \$upstream_addr \$upstream_status \$apisix_upstream_response_time "\$upstream_scheme://\$upstream_host\$upstream_uri" \$request_llm_model \$llm_model \$llm_time_to_first_token \$llm_prompt_tokens \$llm_completion_tokens \$llm_total_tokens \$llm_stream \$llm_has_tool_calls \$llm_tool_count \$llm_end_user_id \$llm_cache_read_input_tokens \$llm_cache_creation_input_tokens \$llm_reasoning_tokens "\$rate_limiting_info" unresolved_host=\$upstream_unresolved_host';
 
     # fake server, only for test
     server {
@@ -896,6 +911,7 @@ _EOC_
 
             set \$upstream_scheme             'http';
             set \$upstream_host               \$http_host;
+            set \$upstream_unresolved_host    '';
             set \$upstream_uri                '';
             set \$request_line                '';
             set \$ctx_ref                     '';
@@ -952,16 +968,19 @@ _EOC_
             proxy_set_header   X-Real-IP         \$remote_addr;
             proxy_pass_header  Date;
 
+            set \$original_x_forwarded_proto \$http_x_forwarded_proto;
+            set \$original_x_forwarded_host   \$http_x_forwarded_host;
+            set \$original_x_forwarded_port   \$http_x_forwarded_port;
+            set \$original_x_forwarded_for    '';
+            set \$original_forwarded          \$http_forwarded;
+            more_set_input_headers "X-Forwarded-Proto: \$scheme";
+            more_set_input_headers "X-Forwarded-Host: \$var_x_forwarded_host";
+            more_set_input_headers "X-Forwarded-Port: \$var_x_forwarded_port";
+            more_set_input_headers "Forwarded: ";
+
             ### the following x-forwarded-* headers is to send to upstream server
 
-            set \$var_x_forwarded_proto      \$scheme;
-            set \$var_x_forwarded_host       \$host;
-            set \$var_x_forwarded_port       \$server_port;
-
             proxy_set_header   X-Forwarded-For      \$proxy_add_x_forwarded_for;
-            proxy_set_header   X-Forwarded-Proto    \$var_x_forwarded_proto;
-            proxy_set_header   X-Forwarded-Host     \$var_x_forwarded_host;
-            proxy_set_header   X-Forwarded-Port     \$var_x_forwarded_port;
 
             proxy_pass         \$upstream_scheme://apisix_backend\$upstream_uri;
             mirror             /proxy_mirror;
