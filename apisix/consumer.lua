@@ -262,7 +262,13 @@ function create_consume_cache(consumers_conf, key_attr)
                            "credential, skipping consumer: ", new_consumer.consumer_name)
 
         else
-            consumer_names[key_value] = new_consumer
+            if type(new_consumer.auth_conf[key_attr]) ~= "table" then
+                consumer_names[new_consumer.auth_conf[key_attr]] = new_consumer
+            else
+                for _, key in ipairs(new_consumer.auth_conf[key_attr]) do
+                    consumer_names[key] = new_consumer
+                end
+            end
         end
     end
 
