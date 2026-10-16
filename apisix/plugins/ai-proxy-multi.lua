@@ -975,7 +975,62 @@ local function check_instance_api_key(ai_instance, api_key)
 end
 
 
+local function is_models_request(ctx)
+    local uri = ctx.var.uri
+    if not uri == "/v1/models" then
+       return false
+    end
+
+    local meth = core.request.get_method()
+    if meth ~= "GET" then
+        return true, 405
+    end
+    return true
+end
+
+
+local function handle_models_request(ctx, conf)
+    local models_data = {}
+    local instances = conf.instances or {}
+
+    -- get model info from conf.instances
+    for _, instance in ipairs(instances) do
+        local model_id = instance.options and instance.options.model
+        if model_id then
+            table.insert(models_data, {
+                id = model_id,
+                object = "model",
+                created = 1677610602,
+                owned_by = instance.provider or "openai",
+            })
+        end
+    end
+
+    ctx.bypass_nginx_upstream = true
+    local ngx_ctx = ngx.ctx
+    ngx_ctx.api_ctx = nil
+
+    -- set the response headers
+    ngx.header.content_type = "application/json"
+
+    --return directly without any further processing
+    return core.response.exit(200, core.json.encode({
+        object = "list",
+        data = models_data
+    }))
+end
+
+
 function _M.access(conf, ctx)
+    -- intercept GET /v1/models
+    local models_request, code = is_models_request(ctx)
+    if models_request == true then
+        if code then
+            return code
+        end
+        return handle_models_request(ctx, conf)
+    end
+
     -- Detect the client protocol and read the body first. get_json_request_body_table
     -- reads and size-checks the body exactly once (bounded by max_req_body_size,
     -- rejecting via Content-Length before buffering), so oversized requests are
