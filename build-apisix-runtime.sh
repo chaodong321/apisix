@@ -26,9 +26,9 @@ if [[ ! "$OPENRESTY_VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
     echo "ERROR: invalid OPENRESTY_VERSION: $OPENRESTY_VERSION" >&2
     exit 1
 fi
-ngx_multi_upstream_module_ver="1.3.3"
+ngx_multi_upstream_module_ver="1.3.4"
 mod_dubbo_ver="1.0.2"
-apisix_nginx_module_ver=${apisix_nginx_module_ver:-"1.19.5"}
+apisix_nginx_module_ver=${apisix_nginx_module_ver:-"1.19.10"}
 if [[ ! "$apisix_nginx_module_ver" =~ ^[A-Za-z0-9._/-]+$ ]]; then
     echo "ERROR: invalid apisix_nginx_module_ver: $apisix_nginx_module_ver" >&2
     exit 1
@@ -36,6 +36,12 @@ fi
 wasm_nginx_module_ver="0.7.0"
 lua_var_nginx_module_ver="v0.5.3"
 lua_resty_events_ver="0.2.0"
+ngx_http_ffi_client_ver=${ngx_http_ffi_client_ver:-"v0.1.3"}
+if [[ ! "$ngx_http_ffi_client_ver" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    echo "ERROR: invalid ngx_http_ffi_client_ver: $ngx_http_ffi_client_ver" >&2
+    exit 1
+fi
+ngx_http_ffi_client_dir="ngx_http_ffi_client-${ngx_http_ffi_client_ver}"
 #zcd: 
 NGINX_VERSION="1.31.1"
 
@@ -137,6 +143,14 @@ else
         lua-var-nginx-module-${lua_var_nginx_module_ver}
 fi
 
+if [ "$repo" == ngx_http_ffi_client ]; then
+    cp -r "$prev_workdir" "./$ngx_http_ffi_client_dir"
+else
+    git clone --depth=1 -b "$ngx_http_ffi_client_ver" \
+        https://github.com/api7/ngx_http_ffi_client.git \
+        "$ngx_http_ffi_client_dir"
+fi
+
 #zcd: download http connect proxy module
 if [ "$repo" !=  ngx_http_proxy_connect_module ]; then
     git clone --depth=1 \
@@ -180,6 +194,11 @@ else
 fi
 
 
+# ngx_http_ffi_client compiles against lua-nginx-module's public API, which it
+# reaches through the bundled copy rather than a separate checkout.
+ngx_lua_bundle_dir=$(find bundle -maxdepth 1 -type d -name 'ngx_lua-*' | head -n 1)
+export NGX_HTTP_LUA_MODULE_DIR="$PWD/$ngx_lua_bundle_dir"
+
 ./configure --prefix="$OR_PREFIX" \
     --with-cc-opt="-DAPISIX_RUNTIME_VER=$runtime_version $cc_opt" \
     --with-ld-opt="-Wl,-rpath,$OR_PREFIX/wasmtime-c-api/lib $ld_opt" \
@@ -192,6 +211,7 @@ fi
     --add-module=../wasm-nginx-module-${wasm_nginx_module_ver} \
     --add-module=../lua-var-nginx-module-${lua_var_nginx_module_ver} \
     --add-module=../lua-resty-events-${lua_resty_events_ver} \
+    --add-module=../${ngx_http_ffi_client_dir} \
     --add-module=../ngx_http_proxy_connect_module \
     --with-poll_module \
     --with-pcre-jit \
@@ -201,6 +221,7 @@ fi
     --with-stream \
     --with-stream_ssl_module \
     --with-stream_ssl_preread_module \
+    --with-stream_realip_module \
     --with-http_v2_module \
     --with-http_v3_module \
     --without-mail_pop3_module \
@@ -234,6 +255,11 @@ sudo install -m 664 lualib/resty/events/*.lua "$OR_PREFIX"/lualib/resty/events/
 sudo install -d "$OR_PREFIX"/lualib/resty/events/compat/
 sudo install -m 644 lualib/resty/events/compat/*.lua "$OR_PREFIX"/lualib/resty/events/compat/
 cd ..
+
+# the C module needs its FFI bindings on the runtime's lua_package_path
+sudo install -d "$OR_PREFIX"/lualib/resty/
+sudo install -m 644 "$ngx_http_ffi_client_dir"/lib/resty/ngx_http_ffi_client.lua \
+    "$OR_PREFIX"/lualib/resty/
 
 cd "apisix-nginx-module-${apisix_nginx_module_ver}" || exit 1
 sudo OPENRESTY_PREFIX="$OR_PREFIX" make install

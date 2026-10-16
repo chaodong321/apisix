@@ -59,6 +59,31 @@ function install_dependencies_with_yum() {
         openresty-zlib-devel openresty-pcre-devel libxml2-devel libxslt-devel zlib-devel
 }
 
+
+# Install dependencies on TopCOS
+function install_dependencies_with_topcos() {
+    echo "skip install dependencies..."
+    sudo dnf install -y dnf-utils
+    #sudo yum-config-manager --add-repo "https://openresty.org/package/${1}/openresty.repo"
+    yum install -y gcc gcc-c++ curl wget unzip xz gnupg perl-ExtUtils-Embed patch libyaml-devel perl perl-devel pcre pcre-devel pcre2 pcre2-devel openldap-devel libxml2-devel libxslt-devel zlib-devel
+    #sudo yum install -y  \
+    #    gcc gcc-c++ curl wget unzip xz gnupg perl-ExtUtils-Embed cpanminus patch libyaml-devel \
+    #    perl perl-devel pcre pcre-devel pcre2 pcre2-devel openldap-devel \
+    #    openresty-zlib-devel openresty-pcre-devel libxml2-devel libxslt-devel zlib-devel
+}
+
+# Install dependencies on Kylin
+function install_dependencies_with_kylin() {
+    echo "skip install dependencies..."
+    #sudo dnf install -y dnf-utils
+    #sudo yum-config-manager --add-repo "https://openresty.org/package/${1}/openresty.repo"
+    yum install -y gcc gcc-c++ curl wget unzip xz gnupg perl-ExtUtils-Embed patch libyaml-devel perl perl-devel pcre pcre-devel pcre2 pcre2-devel openldap-devel libxml2-devel libxslt-devel zlib-devel
+    #sudo yum install -y  \
+    #    gcc gcc-c++ curl wget unzip xz gnupg perl-ExtUtils-Embed cpanminus patch libyaml-devel \
+    #    perl perl-devel pcre pcre-devel pcre2 pcre2-devel openldap-devel \
+    #    openresty-zlib-devel openresty-pcre-devel libxml2-devel libxslt-devel zlib-devel
+}
+
 # Install dependencies on ubuntu and debian
 function install_dependencies_with_apt() {
     # add OpenResty source
@@ -87,6 +112,10 @@ function multi_distro_installation() {
         install_dependencies_with_yum "centos"
     elif grep -Eqi -e "Red Hat" -e "rhel" /etc/*-release; then
         install_dependencies_with_yum "rhel"
+    elif grep -Eqi -e "TopCOS" /etc/*-release; then
+        install_dependencies_with_topcos
+    elif grep -Eqi -e "Kylin" /etc/*-release; then
+        install_dependencies_with_kylin
     elif grep -Eqi "Fedora" /etc/issue || grep -Eq "Fedora" /etc/*-release; then
         install_dependencies_with_yum "fedora"
     elif grep -Eqi "Debian" /etc/issue || grep -Eq "Debian" /etc/*-release; then
@@ -172,3 +201,4 @@ function main() {
 }
 
 main "$@"
+
