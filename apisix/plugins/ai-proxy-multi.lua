@@ -991,12 +991,14 @@ end
 
 local function handle_models_request(ctx, conf)
     local models_data = {}
+    local seen_ids = {}
     local instances = conf.instances or {}
 
     -- get model info from conf.instances
     for _, instance in ipairs(instances) do
         local model_id = instance.options and instance.options.model
-        if model_id then
+        if model_id and not seen_ids[model_id] then
+            seen_ids[model_id] = true
             table.insert(models_data, {
                 id = model_id,
                 object = "model",
