@@ -977,7 +977,7 @@ end
 
 local function is_models_request(ctx)
     local uri = ctx.var.uri
-    if not uri == "/v1/models" then
+    if uri ~= "/v1/models" then
        return false
     end
 
