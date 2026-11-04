@@ -83,6 +83,10 @@ local model_options_schema = {
                 .. "profile ARN (e.g., arn:aws:bedrock:us-east-1:123456789012:"
                 .. "application-inference-profile/abc123).",
         },
+        display_name = {
+            type = "string",
+            description = "Alias for model.",
+        },
     },
     additionalProperties = true,
 }

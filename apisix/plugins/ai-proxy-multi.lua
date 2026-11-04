@@ -538,18 +538,18 @@ end
 -- Build the picker instance set from the healthy subset, reusing
 -- create_health_status/apply_health_status so the per-instance health lookup
 -- lives in exactly one place.
-local function fetch_health_instances(conf, checkers)
+local function fetch_health_instances(conf, allow_instances, checkers)
     if not checkers then
-        return fetch_all_instances(conf)
+        return fetch_allow_instances(allow_instances)
     end
 
     local status = apply_health_status(conf, create_health_status(conf, checkers))
     if not status then
-        return fetch_all_instances(conf)
+        return fetch_allow_instances(allow_instances)
     end
 
-    local new_instances = core.table.new(0, #conf.instances)
-    for _, ins in ipairs(conf.instances) do
+    local new_instances = core.table.new(0, #allow_instances)
+    for _, ins in ipairs(allow_instances) do
         if status[ins.name] then
             transform_instances(new_instances, ins)
         end
@@ -593,7 +593,7 @@ local function create_server_picker(conf, allow_instances, ups_tab, checkers)
     if conf.balancer.algorithm == "chash" then
         new_instances = fetch_allow_instances(allow_instances)
     else
-        new_instances = fetch_health_instances(allow_instances, checkers)
+        new_instances = fetch_health_instances(conf, allow_instances, checkers)
     end
     core.log.info("fetch health instances: ", core.json.delay_encode(new_instances))
 
@@ -643,6 +643,10 @@ local function pick_target(ctx, conf, ups_tab)
         local i = 1
         for _, ins in ipairs(conf.instances) do
             local model = ins.options and ins.options.model or ins.model
+            local display_name = ins.options and ins.options.display_name
+            if display_name and display_name ~= "" then
+                model = display_name
+            end
             if model and model == request_model then
                 core.log.warn("allow llm instance: ", ins.name)
                 table.insert(allow_instances, ins)
@@ -937,7 +941,12 @@ local function pick_ai_instance(ctx, conf, ups_tab)
         instance_conf = conf.instances[1]
 
         if ctx.request_model then
-            if ctx.request_model ~= instance_conf.options.model then
+            local model_name = instance_conf.options and instance_conf.options.model
+            local display_name = instance_conf.options and instance_conf.options.display_name
+            if display_name and display_name ~= "" then
+                model_name = display_name
+            end
+            if ctx.request_model ~= model_name then
                 return nil, nil, "request model is not exist"
             end
         end
